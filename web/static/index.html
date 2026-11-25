@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Brand Impersonation Hunter</title>
+  <meta name="description"
+    content="Find lookalike and phishing domains of a brand: typosquat permutations, Certificate Transparency, threat-intel platforms, favicon and logo hash matching, and OSINT dorks.">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)">
+  <script>
+    // Apply the saved theme before first paint (no flash).
+    try { const t = localStorage.getItem("bih-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) { }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css?v=15">
+</head>
+
+<body>
+  <div class="app" id="app">
+
+    <!-- ============================================================ SIDEBAR -->
+    <aside class="sidebar" id="sidebar" aria-label="Main navigation">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            <circle cx="12" cy="11" r="3" />
+          </svg>
+        </div>
+        <div>
+          <div class="brand-name">Brand Hunter</div>
+          <div class="brand-sub">Impersonation intelligence</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <div class="nav-label">Investigate</div>
+        <button class="nav-item active" id="tab-hunt-btn" data-tab="hunt" onclick="switchTab('hunt')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9" />
+            <circle cx="12" cy="12" r="5" />
+            <circle cx="12" cy="12" r="1.5" />
+          </svg>
+          Impersonation hunt
+        </button>
+
+        <div class="nav-label">Toolkit</div>
+        <button class="nav-item" id="tab-single-btn" data-tab="single" onclick="switchTab('single')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7" />
+            <path d="m20 20-3.5-3.5" />
+          </svg>
+          Asset scan
+        </button>
+        <button class="nav-item" id="tab-batch-btn" data-tab="batch" onclick="switchTab('batch')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="m12 2 10 5-10 5L2 7l10-5z" />
+            <path d="m2 17 10 5 10-5" />
+            <path d="m2 12 10 5 10-5" />
+          </svg>
+          Batch scan
+        </button>
+        <button class="nav-item" id="tab-reverse-btn" data-tab="reverse" onclick="switchTab('reverse')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <path d="m21 15-5-5L5 21" />
+          </svg>
+          Logo inspector
+        </button>
+        <button class="nav-item" id="tab-aggregator-btn" data-tab="aggregator" onclick="switchTab('aggregator')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" />
+          </svg>
+          Hash aggregator
+        </button>
+        <button class="nav-item" id="tab-impersonation-btn" data-tab="impersonation"
+          onclick="switchTab('impersonation')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="m16 18 6-6-6-6" />
+            <path d="m8 6-6 6 6 6" />
+          </svg>
+          Dork generator
+        </button>
+
+        <div class="nav-label">Monitor</div>
+        <button class="nav-item" id="tab-history-btn" data-tab="history" onclick="switchTab('history')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+            <path d="M3 3v5h5M12 7v5l3 2" />
+          </svg>
+          History
+        </button>
+        <button class="nav-item" id="tab-watch-btn" data-tab="watch" onclick="switchTab('watch')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+            <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+          </svg>
+          Watchlist
+          <span class="nav-badge" id="watch-nav-badge" hidden></span>
+        </button>
+
+        <div class="nav-label">Settings</div>
+        <button class="nav-item" id="tab-keys-btn" data-tab="keys" onclick="switchTab('keys')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="7.5" cy="15.5" r="5.5" />
+            <path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3" />
+          </svg>
+          API keys
+          <span class="nav-badge" id="keys-nav-badge" hidden></span>
+        </button>
+        <button class="nav-item" id="tab-storage-btn" data-tab="storage" onclick="switchTab('storage')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3" />
+            <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+            <path d="M3 12a9 3 0 0 0 18 0" />
+          </svg>
+          Storage
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="nav-label" style="padding-top: 0;">Intel sources</div>
+        <div class="sidebar-sources" id="sidebar-sources"><span class="muted">Loading…</span></div>
+        <div class="sidebar-sources" id="sidebar-storage"></div>
+      </div>
+    </aside>
+    <div class="scrim" onclick="toggleNav(false)"></div>
+
+    <!-- ============================================================ MAIN -->
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" type="button" aria-label="Open navigation" onclick="toggleNav(true)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round">
+            <path d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
+        <div class="topbar-title" id="topbar-title">Impersonation hunt</div>
+        <div class="topbar-actions">
+          <a class="btn btn-ghost btn-sm" href="/docs" target="_blank" rel="noopener" title="REST API documentation">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <path d="M14 2v6h6M8 13h8M8 17h5" />
+            </svg>
+            <span class="btn-label">API docs</span>
+          </a>
+          <button class="icon-btn bordered" type="button" id="theme-toggle" onclick="cycleTheme()"
+            aria-label="Switch colour theme" title="Theme: system"></button>
+        </div>
+      </header>
+
+      <main class="content" id="content">
+        <div class="page-head">
+          <h1 id="page-title">Impersonation hunt</h1>
+          <p id="page-desc"></p>
+        </div>
+
+        <!-- ======================================================== ASSET SCAN FORM -->
+        <form id="single-scan-form" class="card" hidden onsubmit="handleSingleScan(event)">
+          <div class="card-body stack">
+            <div class="search-hero">
+              <label class="input-icon">
+                <span class="sr-only">Domain or URL</span>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m20 20-3.5-3.5" />
+                </svg>
+                <input type="text" id="target-input" class="input input-lg" placeholder="Domain or URL, e.g. gi-de.com"
+                  autocomplete="off" spellcheck="false" required>
+              </label>
+              <button type="submit" id="btn-scan" class="btn btn-primary btn-lg">Scan assets</button>
+            </div>
+            <div class="options-row">
+              <div class="option-group">
+                <span class="option-label">Try</span>
+                <button type="button" class="chip" onclick="setTarget('gi-de.com')">gi-de.com</button>
+                <button type="button" class="chip" onclick="setTarget('cyfirma.com')">cyfirma.com</button>
+                <button type="button" class="chip" onclick="setTarget('python.org')">python.org</button>
+              </div>
+              <div class="switches">
+                <label class="switch" title="careers, portal, vpn, extranet, login, ..."><input type="checkbox"
+                    id="toggle-probe-subdomains" checked><span class="track"></span>Probe subdomains</label>
+                <label class="switch"><input type="checkbox" id="toggle-logos" checked><span
+                    class="track"></span>Include logos</label>
+                <label class="switch"><input type="checkbox" id="toggle-save-icons" checked><span
+                    class="track"></span>Archive icons</label>
+              </div>
+            </div>
+          </div>
+        </form>
+
+        <!-- ======================================================== BATCH FORM -->
+        <form id="batch-scan-form" class="card" hidden onsubmit="handleBatchScan(event)">
+          <div class="card-body stack">
+            <label class="field">
+              <span>Domains or URLs</span>
+              <textarea id="batch-targets-input" class="textarea mono"
+                placeholder="gi-de.com&#10;cyfirma.com&#10;python.org" required></textarea>
+              <span class="hint">One per line. Lines starting with # are ignored. Four targets are scanned in
+                parallel.</span>
+            </label>
+            <div class="options-row">
+              <div class="switches">
+                <label class="switch"><input type="checkbox" id="toggle-batch-probe-subdomains" checked><span
+                    class="track"></span>Probe subdomains</label>
+                <label class="switch"><input type="checkbox" id="toggle-batch-logos"><span class="track"></span>Include
+                  logos</label>
+              </div>
+              <button type="submit" id="btn-batch-scan" class="btn btn-primary">Start batch scan</button>
+            </div>
+          </div>
+        </form>
+
+        <!-- ======================================================== LOGO INSPECTOR FORM -->
+        <form id="reverse-scan-form" class="card" hidden onsubmit="handleReverseLogoScan(event)">
+          <div class="card-body stack">
+            <label class="field">
+              <span>Image or page URLs</span>
+              <textarea id="reverse-image-urls-input" class="textarea mono"
+                placeholder="https://suspect-site.xyz/images/brand-logo.png&#10;https://yandex.com/images/search?url=…  (search-result wrappers are unwrapped)&#10;https://phishing-page.example/  (logos are extracted from the page)"></textarea>
+              <span class="hint">One per line. Google Lens, Yandex and Bing result links are unwrapped to the real
+                image.</span>
+            </label>
+            <div class="options-row">
+              <div class="option-group">
+                <label class="btn btn-secondary btn-sm">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <path d="m17 8-5-5-5 5M12 3v12" />
+                  </svg>
+                  Upload images
+                  <input type="file" id="reverse-file-input" accept="image/*" multiple class="sr-only"
+                    onchange="handleMultipleFileUpload(event)">
+                </label>
+                <span id="file-name-display" class="hint"></span>
+                <button type="button" id="btn-clear-uploaded-files" class="btn btn-ghost btn-sm" hidden
+                  onclick="clearUploadedFiles()">Clear</button>
+              </div>
+              <div class="option-group">
+                <span id="compare-target-badge" class="hint"></span>
+                <button type="submit" id="btn-reverse-scan" class="btn btn-primary">Analyze images</button>
+              </div>
+            </div>
+          </div>
+        </form>
+
+        <!-- ======================================================== AGGREGATOR FORM -->
+        <form id="aggregator-scan-form" class="card" hidden onsubmit="handleAggregatorSubmit(event)">
+          <div class="card-body stack">
+            <label class="field">
+              <span>Hashes or existing queries</span>
+              <textarea id="aggregator-input" class="textarea mono"
+                placeholder='(icon_hash="-405598701" || icon_hash="356140581")&#10;or a list: -405598701, 356140581, ab8e8a92…, 8aaaaa7c…'
+                required></textarea>
+              <span class="hint">MMH3 goes to FOFA and Shodan, MD5 to Censys, SHA-256 to URLScan. Other numbers (ports,
+                status codes) are ignored.</span>
+            </label>
+            <div class="options-row">
+              <button type="button" class="chip" onclick="loadGdSampleHashes()">Load sample (11 hashes)</button>
+              <button type="submit" id="btn-aggregate" class="btn btn-primary">Build queries</button>
+            </div>
+          </div>
+        </form>
+
+        <!-- ======================================================== DORK GENERATOR FORM -->
+        <form id="impersonation-scan-form" class="card" hidden onsubmit="handleImpersonationSubmit(event)">
+          <div class="card-body stack">
+            <label class="field">
+              <span>Brands, keywords or domains</span>
+              <textarea id="impersonation-input" class="textarea mono"
+                placeholder="paypal.com, binance, netflix&#10;L&amp;T Avinya Enclave&#10;bbc.co.uk" required></textarea>
+              <span class="hint">Comma or line separated. A domain's own registrable domain is excluded from its
+                results.</span>
+            </label>
+            <div class="options-row">
+              <div class="option-group">
+                <span class="option-label">Samples</span>
+                <button type="button" class="chip" onclick="loadImpersonationSample('lnt')">Real-estate
+                  projects</button>
+                <button type="button" class="chip" onclick="loadImpersonationSample('crypto')">Crypto</button>
+                <button type="button" class="chip" onclick="loadImpersonationSample('brands')">Consumer brands</button>
+                <button type="button" class="chip" onclick="loadImpersonationSample('cyber')">Security &amp;
+                  infra</button>
+              </div>
+              <div class="option-group">
+                <label class="switch"
+                  title="Expand keywords with typosquat, hyphen-split and ASCII Leet lookalike stems (e.g. paypa1, pay-pal, adanl)"><input
+                    type="checkbox" id="imp-toggle-variants" checked><span class="track"></span>Typosquat &amp; evasion
+                  variants</label>
+                <label class="switch"
+                  title="During Capture, also probe newly registered lookalike domains via DNS (catches domains not yet indexed by search engines)"><input
+                    type="checkbox" id="imp-toggle-dns" checked><span class="track"></span>Live DNS lookalikes</label>
+                <button type="submit" id="btn-impersonation-generate" class="btn btn-primary">Generate dorks</button>
+              </div>
+            </div>
+          </div>
+        </form>
+
+        <!-- ======================================================== API KEYS -->
+        <section id="keys-page" class="stack" hidden>
+          <div class="alert alert-info">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+            <div>Keys are saved to the <code>.env</code> file in the project folder on this machine and take effect
+              immediately.
+              A saved key is never shown again: only its last 4 characters. Every key is optional; the hunt uses
+              whichever sources are configured.
+              <br><strong>Rotation:</strong> add several keys per source. The first is used until it is rate-limited or
+              runs out of quota, then the next one takes over automatically. Paused keys come back when their cooldown
+              ends.
+            </div>
+          </div>
+          <div id="keys-error"></div>
+          <div class="keys-grid" id="keys-list"></div>
+        </section>
+
+        <!-- ======================================================== HISTORY -->
+        <section id="history-page" class="stack" hidden>
+          <div class="spread">
+            <label class="field" style="min-width: 240px;"><span class="sr-only">Filter by brand</span>
+              <select id="history-brand" class="select" onchange="renderHistory()">
+                <option value="">All brands</option>
+              </select></label>
+            <span class="hint">Every hunt is saved automatically. Case status and notes are shared by all hunts of a
+              brand.</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table responsive">
+              <thead>
+                <tr>
+                  <th>Brand</th>
+                  <th>When</th>
+                  <th>Depth</th>
+                  <th>High risk</th>
+                  <th>Suspicious</th>
+                  <th>Registered</th>
+                  <th>New</th>
+                  <th class="col-actions"><span class="sr-only">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody id="history-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ======================================================== HUNT FORM -->
+        <form id="hunt-scan-form" class="card" onsubmit="handleHuntSubmit(event)">
+          <div class="card-body stack">
+            <div class="search-hero">
+              <label class="input-icon">
+                <span class="sr-only">Brand domain</span>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <path
+                    d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                </svg>
+                <input type="text" id="hunt-target-input" class="input input-lg"
+                  placeholder="Brand's official domain, e.g. adani.com" autocomplete="off" spellcheck="false" required>
+              </label>
+              <button type="submit" id="btn-hunt" class="btn btn-primary btn-lg">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m20 20-3.5-3.5" />
+                </svg>
+                Start hunt
+              </button>
+            </div>
+
+            <div class="options-row">
+              <div class="option-group">
+                <span class="option-label" id="depth-label">Depth</span>
+                <div class="segmented" role="radiogroup" aria-labelledby="depth-label">
+                  <label title="About 150 candidates, under a minute"><input type="radio" name="hunt-depth"
+                      value="quick"><span>Quick</span></label>
+                  <label title="600 to 1,200 candidates, 1 to 3 minutes"><input type="radio" name="hunt-depth"
+                      value="standard" checked><span>Standard</span></label>
+                  <label title="2,500+ candidates, 3 to 10 minutes"><input type="radio" name="hunt-depth"
+                      value="deep"><span>Deep</span></label>
+                </div>
+              </div>
+              <div class="switches">
+                <label class="switch" title="Search crt.sh for certificates containing the brand name"><input
+                    type="checkbox" id="hunt-toggle-ct" checked><span class="track"></span>CT logs</label>
+                <label class="switch"
+                  title="Run favicon-hash, asset-hash, analytics and dork searches on URLScan, Shodan, FOFA, Censys and Google Lens"><input
+                    type="checkbox" id="hunt-toggle-intel" checked><span class="track"></span>Threat intel</label>
+                <label class="switch"
+                  title="Match the brand against the OpenPhish and Phishing.Database feeds (no key needed)"><input
+                    type="checkbox" id="hunt-toggle-feeds" checked><span class="track"></span>Phishing feeds</label>
+                <label class="switch"
+                  title="Visit live lookalikes (HTML and icons only, no JavaScript, nothing submitted)"><input
+                    type="checkbox" id="hunt-toggle-verify" checked><span class="track"></span>Inspect sites</label>
+                <label class="switch" title="Registration date, registrar and abuse contact (RDAP)"><input
+                    type="checkbox" id="hunt-toggle-rdap" checked><span class="track"></span>Registration data</label>
+              </div>
+            </div>
+
+            <div class="row" id="hunt-sources" aria-label="Threat-intel sources"></div>
+
+            <details class="disclosure">
+              <summary>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="m9 18 6-6-6-6" />
+                </svg>
+                Advanced options
+              </summary>
+              <div class="disclosure-body grid-2">
+                <label class="field">
+                  <span>Brand-owned domains</span>
+                  <textarea id="hunt-allowlist" class="textarea mono" rows="3"
+                    placeholder="adaniports.com&#10;adanigreenenergy.com"></textarea>
+                  <span class="hint">Never reported. Certificate SANs of the brand site are added
+                    automatically.</span>
+                </label>
+                <label class="field">
+                  <span>Extra combosquat words</span>
+                  <textarea id="hunt-keywords" class="textarea mono" rows="3"
+                    placeholder="ports, green, power"></textarea>
+                  <span class="hint">Product or business names phishers pair with the brand.</span>
+                </label>
+              </div>
+            </details>
+          </div>
+        </form>
+
+        <!-- Hunt: first-run explainer (hidden once a hunt runs) -->
+        <section id="hunt-empty" class="card how" aria-label="How a hunt works">
+          <div class="how-step">
+            <div class="how-num">1</div>
+            <h3>Fingerprint</h3>
+            <p>Favicons, logos, title, analytics IDs, brand JS/CSS and certificate, plus the brand's own domains.</p>
+          </div>
+          <div class="how-step">
+            <div class="how-num">2</div>
+            <h3>Discover</h3>
+            <p>Typo, homoglyph and combosquat permutations, CT logs, phishing feeds, URLScan, Shodan, FOFA, Censys and
+              Google Lens.</p>
+          </div>
+          <div class="how-step">
+            <div class="how-num">3</div>
+            <h3>Inspect</h3>
+            <p>DNS for every candidate, then each live site is compared with the brand. No JavaScript runs and nothing
+              is submitted.</p>
+          </div>
+          <div class="how-step">
+            <div class="how-num">4</div>
+            <h3>Rank</h3>
+            <p>A 0-100 risk score with the evidence behind it, registration data and ready-to-run queries.</p>
+          </div>
+        </section>
+
+        <!-- Hunt progress -->
+        <section id="hunt-progress-panel" class="card progress-card" hidden aria-live="polite">
+          <div class="steps" id="hunt-steps"></div>
+          <div class="bar">
+            <div class="bar-fill" id="hunt-bar-fill"></div>
+          </div>
+          <div class="progress-meta">
+            <span id="hunt-progress-msg">Starting…</span>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="cancelHunt()">Cancel</button>
+          </div>
+          <div class="live-stats" id="hunt-live-stats"></div>
+        </section>
+
+          <!-- ======================================================== WATCHLIST -->
+          <section id="watch-page" class="stack" hidden>
+            <form id="watch-form" class="card" onsubmit="addWatch(event)" autocomplete="off">
+              <div class="card-body stack">
+                <div class="search-hero">
+                  <label class="input-icon">
+                    <span class="sr-only">Brand to monitor</span>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                      stroke-linecap="round" stroke-linejoin="round">
+                      <circle cx="12" cy="12" r="10" />
+                      <path
+                        d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                    </svg>
+                    <input type="text" id="watch-brand" class="input input-lg"
+                      placeholder="Brand to monitor, e.g. adani.com" spellcheck="false" required>
+                  </label>
+                  <button type="submit" id="btn-watch-add" class="btn btn-primary btn-lg">Add to watchlist</button>
+                </div>
+                <div class="options-row">
+                  <div class="option-group">
+                    <label class="option-label" for="watch-interval">Check every</label>
+                    <select id="watch-interval" class="select">
+                      <option value="6">6 hours</option>
+                      <option value="12">12 hours</option>
+                      <option value="24" selected>24 hours</option>
+                      <option value="72">3 days</option>
+                      <option value="168">7 days</option>
+                    </select>
+                    <label class="option-label" for="watch-depth">Depth</label>
+                    <select id="watch-depth" class="select">
+                      <option value="quick">Quick</option>
+                      <option value="standard" selected>Standard</option>
+                      <option value="deep">Deep</option>
+                    </select>
+                    <label class="option-label" for="watch-min">Alert at score</label>
+                    <input type="number" id="watch-min" class="input" min="0" max="100" value="45" style="width: 84px;">
+                  </div>
+                </div>
+                <details class="disclosure">
+                  <summary>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+                      stroke-linecap="round" stroke-linejoin="round">
+                      <path d="m9 18 6-6-6-6" />
+                    </svg>
+                    Alert delivery &amp; exceptions
+                  </summary>
+                  <div class="disclosure-body grid-2">
+                    <label class="field"><span>Webhook URL <span class="muted"
+                          style="font-weight: 400;">(optional)</span></span>
+                      <input type="password" id="watch-webhook" class="input mono"
+                        placeholder="https://hooks.slack.com/services/..." autocomplete="off" spellcheck="false">
+                      <span class="hint">Slack, Teams, Mattermost, Discord or any endpoint that accepts JSON. Saved on
+                        this machine; only a hint is shown afterwards. Alerts always appear below.</span></label>
+                    <label class="field"><span>Brand-owned domains <span class="muted"
+                          style="font-weight: 400;">(optional)</span></span>
+                      <textarea id="watch-allow" class="textarea mono" rows="3"
+                        placeholder="adaniports.com&#10;adanipower.com"></textarea>
+                      <span class="hint">Never reported for this brand.</span></label>
+                  </div>
+                </details>
+              </div>
+            </form>
+
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Monitored brands</h2>
+                  <p id="watch-sched-note"></p>
+                </div>
+              </div>
+              <div class="table-wrap" style="border: 0; border-radius: 0 0 var(--r-lg) var(--r-lg);">
+                <table class="table responsive">
+                  <thead>
+                    <tr>
+                      <th>Brand</th>
+                      <th>Every</th>
+                      <th>Last run</th>
+                      <th>Next run</th>
+                      <th>Status</th>
+                      <th>Webhook</th>
+                      <th>Active</th>
+                      <th class="col-actions"><span class="sr-only">Actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="watch-tbody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Alerts</h2>
+                  <p>Only new High risk or Suspicious lookalikes at or above your threshold. The first hunt of a brand
+                    is
+                    a silent baseline.</p>
+                </div>
+                <div class="actions"><button type="button" id="btn-alerts-read" class="btn btn-secondary btn-sm"
+                    onclick="markAlertsRead()" hidden>Mark all read</button></div>
+              </div>
+              <div id="alerts-list"></div>
+            </section>
+          </section>
+
+          <!-- ======================================================== STORAGE -->
+          <section id="storage-page" class="stack" hidden>
+            <div id="storage-error"></div>
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Active storage</h2>
+                  <p>Where hunts, case notes, the watchlist and alerts are saved.</p>
+                </div>
+                <div class="actions"><button type="button" class="btn btn-ghost btn-sm"
+                    onclick="loadStorage()">Refresh</button></div>
+              </div>
+              <div class="card-body" id="storage-active"></div>
+            </section>
+
+            <form id="storage-form" class="card" onsubmit="saveStorage(event)" autocomplete="off">
+              <div class="card-head">
+                <div>
+                  <h2>MongoDB connection</h2>
+                  <p>Use MongoDB instead of the local SQLite file, for example to share one history between analysts or
+                    keep it on a managed cluster. The connection is tested before anything is saved.</p>
+                </div>
+              </div>
+              <div class="card-body stack">
+                <div class="alert alert-info" id="storage-locked" hidden>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="11" width="18" height="11" rx="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                  <div>MONGODB_URI is set in the system environment. Change it there.</div>
+                </div>
+                <label class="field">
+                  <span>Connection string</span>
+                  <div class="secret-input">
+                    <input type="password" id="mongo-uri" class="input mono" placeholder="mongodb://127.0.0.1:27017"
+                      autocomplete="off" spellcheck="false">
+                    <button type="button" class="icon-btn" aria-label="Show or hide the value" title="Show / hide"
+                      onclick="toggleSecret(this)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+                        <circle cx="12" cy="12" r="3" />
+                      </svg></button>
+                  </div>
+                  <span class="hint">Local: <code>mongodb://127.0.0.1:27017</code> &middot; Atlas:
+                    <code>mongodb+srv://user:password@cluster0.xxxxx.mongodb.net/</code>. Percent-encode special
+                    characters in the password (<code>@</code> becomes <code>%40</code>). It is saved in
+                    <code>.env</code>
+                    on this machine and never shown again.</span>
+                </label>
+                <label class="field">
+                  <span>Database name <span class="muted" style="font-weight: 400;">(optional)</span></span>
+                  <input type="text" id="mongo-db" class="input mono" placeholder="brand_hunter" autocomplete="off"
+                    spellcheck="false" maxlength="63">
+                  <span class="hint">Defaults to the database in the connection string, otherwise
+                    <code>brand_hunter</code>. The test writes and removes one temporary document there.</span>
+                </label>
+                <div id="storage-test-result" aria-live="polite"></div>
+                <div class="spread">
+                  <div class="row">
+                    <button type="submit" id="btn-storage-save" class="btn btn-primary btn-sm">Save and switch to
+                      MongoDB</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="testStorage(this)">Test
+                      connection</button>
+                  </div>
+                  <button type="button" id="btn-storage-clear" class="btn btn-danger-ghost btn-sm"
+                    onclick="clearStorage()" hidden>Use local SQLite</button>
+                </div>
+              </div>
+            </form>
+
+            <section class="card" id="storage-migrate-card" hidden>
+              <div class="card-head">
+                <div>
+                  <h2>Copy existing data</h2>
+                  <p id="storage-migrate-info"></p>
+                </div>
+              </div>
+              <div class="card-body stack">
+                <p class="hint">Switching storage does not move old records. Copying is safe to repeat: hunts and case
+                  notes are updated by id, watched brands already present are skipped, and alerts are copied only into
+                  an
+                  empty destination. Watchlist webhook URLs are copied too, so protect the database like any credential
+                  store.</p>
+                <div id="storage-migrate-result" aria-live="polite"></div>
+                <div class="row">
+                  <button type="button" id="btn-migrate-up" class="btn btn-primary btn-sm"
+                    onclick="migrateStorage('to_mongodb', this)">Copy local SQLite to MongoDB</button>
+                  <button type="button" class="btn btn-secondary btn-sm"
+                    onclick="migrateStorage('to_sqlite', this)">Copy
+                    MongoDB to local SQLite</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>What is stored in MongoDB</h2>
+                  <p>Each lookalike domain is its own document, so you can query results directly.</p>
+                </div>
+              </div>
+              <div class="card-body stack">
+                <dl class="kv" style="grid-template-columns: 110px minmax(0, 1fr);">
+                  <dt>hunts</dt>
+                  <dd>one per hunt: counters, brand fingerprint, queries and dorks</dd>
+                  <dt>candidates</dt>
+                  <dd>one per lookalike per hunt: domain, score, verdict, target, plus the full evidence in
+                    <code>data</code>
+                  </dd>
+                  <dt>triage</dt>
+                  <dd>case status and notes per brand and domain</dd>
+                  <dt>watchlist</dt>
+                  <dd>monitored brands (with webhook URLs)</dd>
+                  <dt>alerts, counters</dt>
+                  <dd>in-app alerts and integer ids</dd>
+                </dl>
+                <pre class="alert-body"
+                  style="margin: 0;">db.candidates.find({ target: "paypal.com", verdict: "phishing" }).sort({ score: -1 })</pre>
+              </div>
+            </section>
+          </section>
+
+          <!-- Shared loading state -->
+          <div id="loading-panel" class="card loading" role="status" aria-live="polite">
+            <div class="spinner"></div>
+            <div>
+              <div style="font-weight: 600;">Working…</div>
+              <div class="hint" id="loading-status"></div>
+            </div>
+          </div>
+
+          <!-- ======================================================== HUNT RESULTS -->
+          <section id="hunt-results-section" class="stack" hidden>
+            <div class="spread">
+              <div>
+                <h2 class="card-title" id="hunt-res-domain" style="font-size: 18px;">-</h2>
+                <p class="card-sub" id="hunt-res-meta"></p>
+              </div>
+              <div class="row">
+                <a class="btn btn-secondary btn-sm" id="hunt-ioc-txt" href="#" download
+                  title="High-risk and suspicious domains, one per line, for blocklists" hidden>Blocklist</a>
+                <a class="btn btn-secondary btn-sm" id="hunt-ioc-stix" href="#" download
+                  title="STIX 2.1 indicators for TIPs and SIEMs" hidden>STIX 2.1</a>
+                <button class="btn btn-secondary btn-sm" onclick="exportHuntCSV()">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <path d="m7 10 5 5 5-5M12 15V3" />
+                  </svg>
+                  CSV
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="exportHuntJSON()">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <path d="m7 10 5 5 5-5M12 15V3" />
+                  </svg>
+                  JSON
+                </button>
+              </div>
+            </div>
+
+            <div class="stats" id="hunt-tiles"></div>
+            <div id="hunt-errors" class="stack" style="gap: 8px;"></div>
+
+            <div class="tabs" role="tablist" aria-label="Hunt result views" id="hunt-view-tabs">
+              <button class="tab active" role="tab" data-hview="lookalikes"
+                onclick="setHuntView('lookalikes')">Lookalikes
+                <span class="count" id="hv-count-lookalikes">0</span></button>
+              <button class="tab" role="tab" data-hview="intel" onclick="setHuntView('intel')">Threat intel <span
+                  class="count" id="hv-count-intel">0</span></button>
+              <button class="tab" role="tab" data-hview="fingerprint" onclick="setHuntView('fingerprint')">Brand
+                fingerprint</button>
+              <button class="tab" role="tab" data-hview="queries" onclick="setHuntView('queries')">Queries &amp;
+                dorks</button>
+            </div>
+
+            <!-- Lookalikes -->
+            <div class="stack" data-hpanel="lookalikes">
+              <div class="spread">
+                <div class="chips chips-scroll" id="hunt-filters" aria-label="Filter by verdict"></div>
+                <label class="input-icon filter-search">
+                  <span class="sr-only">Filter results</span>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round">
+                    <circle cx="11" cy="11" r="7" />
+                    <path d="m20 20-3.5-3.5" />
+                  </svg>
+                  <input type="search" id="hunt-search" class="input" placeholder="Filter domains, titles, reasons"
+                    oninput="renderHuntTable()">
+                </label>
+              </div>
+              <div class="table-wrap">
+                <table class="table responsive">
+                  <thead>
+                    <tr>
+                      <th>Score</th>
+                      <th>Domain</th>
+                      <th>Verdict</th>
+                      <th>Evidence</th>
+                      <th>Type</th>
+                      <th>Age</th>
+                      <th>Icon</th>
+                      <th class="col-actions"><span class="sr-only">Actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="hunt-tbody"></tbody>
+                </table>
+              </div>
+              <div class="table-foot" id="hunt-table-foot"></div>
+            </div>
+
+            <!-- Threat intel -->
+            <div class="stack" data-hpanel="intel" hidden>
+              <section class="card" id="hunt-infra-panel" hidden>
+                <div class="card-head">
+                  <div>
+                    <h2>Infrastructure serving brand assets</h2>
+                    <p>IP-only hits from favicon, file-hash and analytics searches. The brand's own servers can appear
+                      here, so confirm ownership first.</p>
+                  </div>
+                </div>
+                <div class="table-wrap" style="border: 0; border-radius: 0 0 var(--r-lg) var(--r-lg);">
+                  <table class="table responsive">
+                    <thead>
+                      <tr>
+                        <th>IP:port</th>
+                        <th>Title</th>
+                        <th>Network</th>
+                        <th>Matched by</th>
+                        <th class="col-actions"><span class="sr-only">Actions</span></th>
+                      </tr>
+                    </thead>
+                    <tbody id="hunt-infra-tbody"></tbody>
+                  </table>
+                </div>
+              </section>
+              <section class="card">
+                <div class="card-head">
+                  <div>
+                    <h2>Queries run</h2>
+                    <p>Every search the hunt ran automatically. Add keys to <code>.env</code> (template in
+                      <code>.env.example</code>) to switch on more sources; changes apply without a restart.
+                    </p>
+                  </div>
+                </div>
+                <div class="table-wrap" style="border: 0; border-radius: 0 0 var(--r-lg) var(--r-lg);">
+                  <table class="table responsive">
+                    <thead>
+                      <tr>
+                        <th>Source</th>
+                        <th>Looking for</th>
+                        <th>Hits</th>
+                        <th>Status</th>
+                        <th class="col-actions"><span class="sr-only">Actions</span></th>
+                      </tr>
+                    </thead>
+                    <tbody id="hunt-intel-tbody"></tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+
+            <!-- Brand fingerprint -->
+            <div data-hpanel="fingerprint" hidden>
+              <section class="card">
+                <div class="card-body" id="hunt-brand"></div>
+              </section>
+            </div>
+
+            <!-- Queries & dorks -->
+            <div class="stack" data-hpanel="queries" hidden>
+              <section class="card">
+                <div class="card-head">
+                  <div>
+                    <h2>Favicon &amp; logo hash queries</h2>
+                    <p>Servers serving the brand favicon (FOFA, Shodan, Censys) or pages loading its logo (URLScan).</p>
+                  </div>
+                </div>
+                <div class="card-body">
+                  <div class="platform-grid" id="hunt-hash-grid"></div>
+                </div>
+              </section>
+              <section class="card" id="hunt-pivot-panel">
+                <div class="card-head">
+                  <div>
+                    <h2>Pivot queries</h2>
+                    <p>Cloned kits usually keep the brand's analytics IDs and JS/CSS files even when the favicon
+                      changes.
+                    </p>
+                  </div>
+                </div>
+                <div class="card-body">
+                  <div class="query-list" id="hunt-pivot-list"></div>
+                </div>
+              </section>
+              <section class="card">
+                <div class="card-head">
+                  <div>
+                    <h2>Search engine dorks</h2>
+                    <p>Impersonation pages, free hosting, fake jobs and helplines, social media, apps and leaks.</p>
+                  </div>
+                </div>
+                <div class="card-body" id="hunt-search-dorks"></div>
+              </section>
+              <section class="card">
+                <div class="card-head">
+                  <div>
+                    <h2>Platform impersonation dorks</h2>
+                    <p>Title, hostname, certificate and page-content searches with the brand's own domain excluded.</p>
+                  </div>
+                </div>
+                <div class="card-body">
+                  <div class="platform-grid" id="hunt-dork-grid"></div>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <!-- ======================================================== ASSET / BATCH RESULTS -->
+          <section id="results-section" class="stack" hidden>
+            <div class="spread">
+              <div>
+                <h2 class="card-title" id="res-target-domain" style="font-size: 18px;">-</h2>
+                <div class="row" style="margin-top: 4px;">
+                  <span class="card-sub mono" id="res-resolved-url"></span>
+                  <span class="badge badge-sm" id="res-icons-count"></span>
+                </div>
+              </div>
+              <div class="row">
+                <button class="btn btn-primary btn-sm" onclick="launchMasterAllEngines()"
+                  title="Open the master query on FOFA, Shodan, Censys and URLScan">Open on all platforms</button>
+                <button class="btn btn-secondary btn-sm" onclick="openAllFofaHashesMultipleTabs()"
+                  title="Open each FOFA hash in its own tab">FOFA tabs</button>
+                <button class="btn btn-secondary btn-sm" onclick="exportCurrentJSON()">JSON</button>
+                <button class="btn btn-secondary btn-sm" onclick="exportCurrentCSV()">CSV</button>
+              </div>
+            </div>
+            <div id="batch-nav" class="batch-nav" hidden></div>
+
+            <section class="card" id="master-combined-query-deck" hidden>
+              <div class="card-head">
+                <div>
+                  <h2>Master queries <span class="badge badge-sm badge-accent" id="master-hash-count"
+                      style="margin-left: 6px;"></span></h2>
+                  <p id="master-query-note"></p>
+                </div>
+                <div class="actions"><button class="btn btn-secondary btn-sm" id="btn-master-copy-all"
+                    onclick="copyMasterAllQueries()">Copy all</button></div>
+              </div>
+              <div class="card-body">
+                <div class="query-list" id="master-query-rows"></div>
+              </div>
+            </section>
+
+            <div>
+              <h3 class="group-title">Discovered icons</h3>
+              <div class="grid-cards" id="icons-grid-container"></div>
+            </div>
+
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Per-icon queries</h2>
+                  <p>One query per hash. The primary favicon is the one crawlers most often index.</p>
+                </div>
+              </div>
+              <div class="card-body stack">
+                <details class="disclosure" style="border-top: 0; padding-top: 0;">
+                  <summary>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+                      stroke-linecap="round" stroke-linejoin="round">
+                      <path d="m9 18 6-6-6-6" />
+                    </svg>
+                    Platform notes
+                  </summary>
+                  <ul class="tip-list disclosure-body">
+                    <li>Shodan filters and FOFA <code>icon_hash</code> need a logged-in account. Censys links open the
+                      Censys Platform (CenQL).</li>
+                    <li>MMH3 goes to FOFA and Shodan; MD5 to Censys (which hashes only the first 384 KB); SHA-256 to
+                      URLScan <code>hash:</code>, which matches any resource a scanned page loaded.</li>
+                    <li>Logos are searched on URLScan only, since the other platforms index favicons only.</li>
+                    <li>Platforms only return what their crawlers have indexed: zero results for a new or private site
+                      is
+                      normal.</li>
+                  </ul>
+                </details>
+                <div class="platform-grid" id="platform-queries-grid"></div>
+              </div>
+            </section>
+          </section>
+
+          <!-- ======================================================== LOGO INSPECTOR RESULTS -->
+          <section id="reverse-results-section" class="stack" hidden>
+            <div class="spread">
+              <div>
+                <h2 class="card-title" style="font-size: 18px;">Candidate images</h2>
+                <p class="card-sub" id="reverse-source-domain-tag"></p>
+              </div>
+              <div class="row">
+                <button class="btn btn-primary btn-sm" onclick="launchReverseBulkEngines()">Open on all
+                  platforms</button>
+                <button class="btn btn-secondary btn-sm" onclick="openAllFofaHashesMultipleTabs()">FOFA tabs</button>
+                <button class="btn btn-secondary btn-sm" onclick="copyReverseBulkQueries()">Copy queries</button>
+              </div>
+            </div>
+            <section class="card" id="reverse-master-deck" hidden>
+              <div class="card-head">
+                <div>
+                  <h2>Master queries</h2>
+                  <p>Every analyzed image OR-ed into one search per platform.</p>
+                </div>
+              </div>
+              <div class="card-body">
+                <div class="platform-grid" id="reverse-master-query-grid"></div>
+              </div>
+            </section>
+            <div class="grid-cards" id="reverse-candidates-container"></div>
+          </section>
+
+          <!-- ======================================================== AGGREGATOR RESULTS -->
+          <section id="aggregator-results-section" class="stack" hidden>
+            <div class="spread">
+              <div>
+                <h2 class="card-title" style="font-size: 18px;">Master queries</h2>
+                <p class="card-sub" id="agg-hash-count-tag"></p>
+              </div>
+              <div class="row">
+                <button class="btn btn-primary btn-sm" onclick="launchAggregatorEngines()">Open on all
+                  platforms</button>
+                <button class="btn btn-secondary btn-sm" onclick="copyAggregatorQueries()">Copy all</button>
+              </div>
+            </div>
+            <div class="stack" id="aggregator-query-grid"></div>
+          </section>
+
+          <!-- ======================================================== DORK GENERATOR RESULTS -->
+          <section id="impersonation-results-section" class="stack" hidden>
+            <div class="spread">
+              <div>
+                <h2 class="card-title" style="font-size: 18px;">Impersonation dorks</h2>
+                <p class="card-sub" id="impersonation-count-tag"></p>
+              </div>
+              <div class="row">
+                <button class="btn btn-primary btn-sm" id="btn-impersonation-capture"
+                  onclick="handleImpersonationCapture()"
+                  title="Run keyword dorks across crt.sh, URLScan, and configured threat-intel sources">Capture matching
+                  domains</button>
+                <button class="btn btn-secondary btn-sm" onclick="launchAllImpersonationTabs()">Open master
+                  queries</button>
+                <button class="btn btn-secondary btn-sm" onclick="openImpersonationPlatformTabs('fofa')">FOFA
+                  tabs</button>
+                <button class="btn btn-secondary btn-sm" onclick="openImpersonationPlatformTabs('censys')">Censys
+                  tabs</button>
+                <button class="btn btn-secondary btn-sm" onclick="openImpersonationPlatformTabs('urlscan')">URLScan
+                  tabs</button>
+                <button class="btn btn-secondary btn-sm" onclick="openImpersonationPlatformTabs('shodan')">Shodan
+                  tabs</button>
+                <button class="btn btn-secondary btn-sm" onclick="exportImpersonationCSV()">CSV</button>
+              </div>
+            </div>
+            <section class="card" id="impersonation-captured-panel" hidden>
+              <div class="card-head">
+                <div>
+                  <h2>Captured matching domains <span class="badge badge-sm badge-accent" id="imp-capture-count"
+                      style="margin-left: 6px;">0</span></h2>
+                  <p id="imp-capture-meta"></p>
+                </div>
+                <div class="actions">
+                  <input type="search" id="imp-capture-filter" class="input" style="height: 30px; width: 210px;"
+                    placeholder="Filter captured domains" oninput="renderCapturedDomains()">
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="copyCapturedDomains(false)">Copy
+                    domains</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="copyCapturedDomains(true)">Copy
+                    apex</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="exportCapturedDomainsCSV()">Domains
+                    CSV</button>
+                </div>
+              </div>
+              <div class="card-body stack">
+                <div class="row" id="imp-capture-sources"></div>
+                <div class="table-wrap" style="max-height: 440px;">
+                  <table class="table responsive">
+                    <thead>
+                      <tr>
+                        <th>Domain</th>
+                        <th>Apex</th>
+                        <th>Sources</th>
+                        <th>Page title</th>
+                        <th>Last seen</th>
+                        <th class="col-actions"><span class="sr-only">Actions</span></th>
+                      </tr>
+                    </thead>
+                    <tbody id="imp-capture-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>Combined across all keywords</h2>
+                  <p>Use <strong>All domains</strong> dorks to match the keyword anywhere in hostnames, root domains, or
+                    TLS certificates.</p>
+                </div>
+              </div>
+              <div class="card-body">
+                <div class="platform-grid" id="impersonation-master-grid"></div>
+              </div>
+            </section>
+            <section class="card" id="impersonation-extra-card" hidden>
+              <div class="card-head">
+                <div>
+                  <h2>Certificate Transparency (crt.sh) &amp; Search Engines</h2>
+                  <p>Public CT logs and search-engine dorks capturing domains indexed across the web.</p>
+                </div>
+              </div>
+              <div class="card-body stack" id="impersonation-extra-body"></div>
+            </section>
+            <div class="stack" id="impersonation-cards-container"></div>
+          </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="takedown-dialog" class="dialog" aria-labelledby="td-title">
+    <div class="dialog-head">
+      <h2 id="td-title">Takedown pack</h2>
+      <button type="button" class="icon-btn" aria-label="Close" onclick="closeTakedown()"><svg width="18" height="18"
+          viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M18 6 6 18M6 6l12 12" />
+        </svg></button>
+    </div>
+    <div class="dialog-body stack" id="td-body"></div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+      stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+    <span id="toast-message"></span>
+  </div>
+
+  <script src="/static/app.js?v=15"></script>
+</body>
+
+</html>

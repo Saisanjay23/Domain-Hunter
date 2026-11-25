@@ -1,0 +1,55 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Local data, SQLite databases & cached feeds
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Generated scan/hunt outputs & downloaded assets
+downloaded_icons/
+hunt.json
+hunt.csv
+batch.json
+batch.csv
+batch_output.json
+batch_output.csv
+*.log
+
+# Python bytecode, packaging & test/lint caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.installed.cfg
+*.egg
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE, AI tools, OS & backup archives
+.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+_removed-*.zip
+*.zip
