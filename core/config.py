@@ -8,6 +8,7 @@ never sent back to the browser, only a masked hint (last 4 characters).
     FOFA_KEY          FOFA API key   (FOFA_EMAIL too, for older accounts)
     CENSYS_PAT        Censys Platform personal access token (CENSYS_ORG_ID for organisation accounts)
     SERPAPI_KEY       SerpApi, used for automated Google Lens reverse logo search
+    WHOISXML_API_KEY  WhoisXML API key (Brand Alert daily NRD + Domains & Subdomains Discovery)
 """
 
 import hashlib
@@ -22,14 +23,22 @@ ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
 SOURCES = {
     "urlscan": {"name": "URLScan", "env": ["URLSCAN_API_KEY"], "key_required": False,
                 "does": "Scans that loaded the brand's favicon/logo/JS files, lookalike domains, free-hosting pages"},
-    "shodan": {"name": "Shodan", "env": ["SHODAN_API_KEY"], "key_required": True,
+    "shodan": {"paid": True, "name": "Shodan", "env": ["SHODAN_API_KEY"], "key_required": True,
                "does": "Servers serving the brand favicon, cloned titles, the brand's analytics ID in HTML"},
-    "fofa": {"name": "FOFA", "env": ["FOFA_KEY", "FOFA_EMAIL"], "key_required": True,
+    "fofa": {"paid": True, "name": "FOFA", "env": ["FOFA_KEY", "FOFA_EMAIL"], "key_required": True,
              "does": "Servers serving the brand favicon, lookalike hosts/titles, analytics ID in page body"},
-    "censys": {"name": "Censys", "env": ["CENSYS_PAT", "CENSYS_ORG_ID"], "key_required": True,
+    "censys": {"paid": True, "name": "Censys", "env": ["CENSYS_PAT", "CENSYS_ORG_ID"], "key_required": True,
                "does": "Hosts and web properties serving the brand favicon, lookalike titles/hostnames"},
-    "serpapi": {"name": "Google Lens (SerpApi)", "env": ["SERPAPI_KEY"], "key_required": True,
+    "serpapi": {"paid": True, "name": "Google Lens (SerpApi)", "env": ["SERPAPI_KEY"], "key_required": True,
                 "does": "Automated reverse image search of the brand logo"},
+    "whoisxml": {"paid": True, "name": "WhoisXML", "env": ["WHOISXML_API_KEY"], "key_required": True,
+                 "does": "Daily newly registered/updated lookalike domains (Brand Alert) & domain discovery"},
+    "virustotal": {"name": "VirusTotal", "env": ["VIRUSTOTAL_API_KEY"], "key_required": True,
+                   "does": "Search flagged URLs, malicious/suspicious domains & subdomain intelligence"},
+    "safebrowsing": {"name": "Google Safe Browsing", "env": ["GOOGLE_SAFE_BROWSING_KEY"], "key_required": True,
+                     "does": "Checks every candidate against Google's phishing / malware lists (Lookup API v4)"},
+    "otx": {"name": "AlienVault OTX", "env": ["OTX_API_KEY"], "key_required": False,
+            "does": "Passive DNS: other hostnames seen under a suspicious registered domain (works without a key)"},
 }
 
 # Everything the settings page may read or write (whitelist).
@@ -41,6 +50,10 @@ KEY_FIELDS = {
     "CENSYS_PAT": {"source": "censys", "label": "Personal access token", "secret": True, "required": True},
     "CENSYS_ORG_ID": {"source": "censys", "label": "Organisation ID (organisation accounts only)", "secret": False, "required": False},
     "SERPAPI_KEY": {"source": "serpapi", "label": "API key", "secret": True, "required": True},
+    "WHOISXML_API_KEY": {"source": "whoisxml", "label": "API key", "secret": True, "required": True},
+    "VIRUSTOTAL_API_KEY": {"source": "virustotal", "label": "API key", "secret": True, "required": True},
+    "GOOGLE_SAFE_BROWSING_KEY": {"source": "safebrowsing", "label": "API key", "secret": True, "required": True},
+    "OTX_API_KEY": {"source": "otx", "label": "API key (optional, raises limits)", "secret": True, "required": False},
     # Storage backend (not a threat-intel source). The URI holds credentials, so it is a secret, but a single
     # value: replica-set URIs contain commas, so it must never be split into a key list.
     "MONGODB_URI": {"source": "mongodb", "label": "Connection string", "secret": True, "required": False, "multi": False},
@@ -53,6 +66,10 @@ SOURCE_LINKS = {
     "fofa": "https://en.fofa.info/",
     "censys": "https://platform.censys.io/",
     "serpapi": "https://serpapi.com/manage-api-key",
+    "whoisxml": "https://user.whoisxmlapi.com/products",
+    "virustotal": "https://www.virustotal.com/gui/my-apikey",
+    "safebrowsing": "https://console.cloud.google.com/apis/library/safebrowsing.googleapis.com",
+    "otx": "https://otx.alienvault.com/api",
 }
 
 _VALUE_RE = re.compile(r"^[\x21-\x7e]{1,512}$")  # printable ASCII, no spaces / newlines
@@ -133,6 +150,25 @@ def key_id(value: str) -> str:
 def is_configured(source: str) -> bool:
     meta = SOURCES[source]
     return (not meta["key_required"]) or bool(get(meta["env"][0]))
+
+
+# Paid platforms (Shodan, FOFA, Censys, SerpApi, WhoisXML) are never called while free mode is on, which is the
+# default: a saved key whose plan cannot run the searches only produces errors. FREE_ONLY_MODE=0 turns them back on.
+def free_only() -> bool:
+    return _raw("FREE_ONLY_MODE").lower() not in ("0", "false", "no", "off")
+
+
+def is_paid(source: str) -> bool:
+    return bool((SOURCES.get(source) or {}).get("paid"))
+
+
+def is_enabled(source: str) -> bool:
+    """Should automated searches call this source? Free built-ins always; paid ones only outside free mode."""
+    if source not in SOURCES:
+        return True
+    if is_paid(source) and free_only():
+        return False
+    return is_configured(source)
 
 
 def mask(value: Optional[str]) -> str:
@@ -288,9 +324,11 @@ def sources_status() -> List[Dict]:
     for key, meta in SOURCES.items():
         key_count = len(get_list(meta["env"][0]))
         has_key = key_count > 0
+        off_by_free_mode = bool(meta.get("paid")) and free_only()
         out.append({
             "id": key, "name": meta["name"], "does": meta["does"], "env": meta["env"][0], "key_count": key_count,
-            "has_key": has_key, "enabled": has_key or not meta["key_required"],
-            "mode": "key" if has_key else ("anonymous" if not meta["key_required"] else "off"),
+            "has_key": has_key, "enabled": (has_key or not meta["key_required"]) and not off_by_free_mode,
+            "mode": "free_mode_off" if off_by_free_mode else ("key" if has_key else ("anonymous" if not meta["key_required"] else "off")),
+            "paid": bool(meta.get("paid")),
         })
     return out

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <defs>
+    <linearGradient id="dhFavBg" x1="6" y1="6" x2="58" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5b5bf5"/>
+      <stop offset="48%" stop-color="#7c4dff"/>
+      <stop offset="100%" stop-color="#1fb6e8"/>
+    </linearGradient>
+    <linearGradient id="dhFavShield" x1="20" y1="14" x2="44" y2="50" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.06"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#dhFavBg)"/>
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="15.25" stroke="#ffffff" stroke-opacity="0.28" stroke-width="1.5"/>
+  <path d="M32 13L47 19.2V31.5C47 41.2 40.5 48.2 32 51.5C23.5 48.2 17 41.2 17 31.5V19.2L32 13Z" fill="url(#dhFavShield)" stroke="#ffffff" stroke-width="3.6" stroke-linejoin="round"/>
+  <path d="M25.5 32.5L30.2 37.2L39.5 27" stroke="#ffffff" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

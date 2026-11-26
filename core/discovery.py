@@ -16,7 +16,7 @@ import string
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import requests
 
@@ -201,35 +201,121 @@ def is_parked_ns(ns_list: List[str]) -> bool:
     return any(ns.endswith(p) or f".{p}" in ns for ns in ns_list for p in PARKING_NS)
 
 
+def _ctlogs_fallback(token: str, timeout: int, max_hosts: int) -> Optional[Dict]:
+    """Free ctlogs.dev fallback when crt.sh is overloaded or times out."""
+    clean_tok = token.strip().lower().rstrip(".")
+    subdomain_only = token.strip().endswith(".")
+    try:
+        resp = requests.get("https://ctlogs.dev/search", params={"q": clean_tok, "output": "json"}, headers=HTTP_HEADERS, timeout=min(timeout, 15))
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+        rows = payload.get("rows") if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+        if not isinstance(rows, list):
+            return None
+        hosts: Dict[str, Dict] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            nb = str(row.get("not_before") or "")[:10]
+            raw_names = list(row.get("matches") or [])
+            if row.get("match"):
+                raw_names.append(row["match"])
+            for n in raw_names:
+                n = str(n or "").strip().lower().lstrip("*.").rstrip(".")
+                if not n or "@" in n or " " in n or "." not in n:
+                    continue
+                if subdomain_only:
+                    if not n.startswith(clean_tok + ".") and (f".{clean_tok}." not in n):
+                        continue
+                elif clean_tok not in n.replace("-", "") and clean_tok not in n:
+                    continue
+                h = hosts.setdefault(n, {"first_seen": nb, "last_seen": nb, "issuer": str(row.get("issuer") or ""), "certs": 0})
+                h["certs"] += 1
+                if nb and (not h["first_seen"] or nb < h["first_seen"]):
+                    h["first_seen"] = nb
+                if nb and nb > h["last_seen"]:
+                    h["last_seen"] = nb
+        if len(hosts) > max_hosts:
+            hosts = dict(sorted(hosts.items(), key=lambda kv: kv[1]["last_seen"], reverse=True)[:max_hosts])
+        return {"hosts": hosts, "error": None}
+    except Exception:
+        return None
+
+
 # ============================================================== Certificate Transparency
-def crtsh_search(token: str, timeout: int = 45, retries: int = 2, max_hosts: int = 1500) -> Dict:
+_CT_CACHE: Dict[Tuple[str, int], Tuple[float, Dict]] = {}
+_CT_CACHE_LOCK = threading.Lock()
+CT_CACHE_TTL = 900.0   # crt.sh is slow and rate-limited: one lookup per token per 15 minutes is plenty
+
+
+def clear_ct_cache() -> None:
+    with _CT_CACHE_LOCK:
+        _CT_CACHE.clear()
+
+
+def crtsh_search(token: str, timeout: int = 18, retries: int = 1, max_hosts: int = 1500) -> Dict:
     """
-    Hostnames in CT logs whose certificate identity contains the token (crt.sh %token%).
+    Hostnames in CT logs whose certificate identity contains the token (or subdomain prefix `<tok>.%`),
+    with fast free ctlogs.dev fallback when crt.sh is overloaded.
     Returns {"hosts": {host: {"first_seen", "last_seen", "issuer", "certs"}}, "error": str|None}.
+
+    Successful lookups are cached (CT_CACHE_TTL) so repeated hunts, the daily radar and the keyword capture
+    never ask crt.sh the same question twice; failures are never cached.
     """
-    token = (token or "").strip().lower()
-    if len(token) < 3:
+    key = ((token or "").strip().lower(), max_hosts)
+    now = time.monotonic()
+    with _CT_CACHE_LOCK:
+        hit = _CT_CACHE.get(key)
+        if hit and now - hit[0] < CT_CACHE_TTL:
+            return {"hosts": {h: dict(m) for h, m in hit[1]["hosts"].items()}, "error": None, "cached": True}
+    result = _crtsh_fetch(token, timeout, retries, max_hosts)
+    if not result.get("error"):
+        with _CT_CACHE_LOCK:
+            if len(_CT_CACHE) > 128:
+                _CT_CACHE.clear()
+            _CT_CACHE[key] = (now, result)
+    return result
+
+
+def _crtsh_fetch(token: str, timeout: int, retries: int, max_hosts: int) -> Dict:
+    raw = (token or "").strip().lower()
+    subdomain_only = raw.endswith(".")
+    clean = raw.rstrip(".")
+    if len(clean) < 3:
         return {"hosts": {}, "error": "token too short for CT search"}
     url = "https://crt.sh/"
-    # Full history first; the lighter "exclude=expired" variant often succeeds when crt.sh is overloaded.
-    variants = [{"q": f"%{token}%", "output": "json"}, {"q": f"%{token}%", "output": "json", "exclude": "expired"}]
+    variants = (
+        [{"q": f"{clean}.%", "output": "json"}, {"q": f"{clean}.%", "output": "json", "exclude": "expired"}]
+        if subdomain_only else
+        [{"q": f"%{clean}%", "output": "json", "exclude": "expired"}, {"q": f"{clean}.%", "output": "json"}]
+    )
     last_err = None
     for attempt in range(retries + 1):
         params = variants[min(attempt, len(variants) - 1)]
+        backoff = 1.5 * (attempt + 1)
         try:
             resp = requests.get(url, params=params, headers=HTTP_HEADERS, timeout=timeout)
             if resp.status_code == 200:
                 rows = resp.json()
                 break
             last_err = f"crt.sh HTTP {resp.status_code}"
+            if resp.status_code == 429:  # rate limited: wait as long as the server asks (bounded)
+                try:
+                    backoff = min(max(backoff, float(resp.headers.get("Retry-After", "") or 0)), 8.0)
+                except (TypeError, ValueError):
+                    pass
         except ValueError:
             last_err = "crt.sh returned invalid JSON"
         except requests.RequestException as e:
             last_err = f"crt.sh unreachable: {e.__class__.__name__}"
         if attempt < retries:
-            time.sleep(3 * (attempt + 1))
+            time.sleep(backoff)
     else:
-        return {"hosts": {}, "error": f"{last_err} (crt.sh is often overloaded; re-run later for CT results)"}
+        fb = _ctlogs_fallback(raw, timeout, max_hosts)
+        if fb is not None:
+            return fb
+        return {"hosts": {}, "error": f"{last_err} (crt.sh overloaded; try later or view URLScan results)"}
 
     hosts: Dict[str, Dict] = {}
     for row in rows:
@@ -247,7 +333,10 @@ def crtsh_search(token: str, timeout: int = 45, retries: int = 2, max_hosts: int
             if part.startswith("O="):
                 org = part[2:].strip('"')
         for n in names:
-            if token not in n.replace("-", "") and token not in n:
+            if subdomain_only:
+                if not n.startswith(clean + ".") and (f".{clean}." not in n):
+                    continue
+            elif clean not in n.replace("-", "") and clean not in n:
                 continue
             h = hosts.setdefault(n, {"first_seen": nb, "last_seen": nb, "issuer": org, "certs": 0})
             h["certs"] += 1
@@ -292,6 +381,33 @@ def _vcard_value(entity: Dict, key: str) -> Optional[str]:
     return None
 
 
+_REDACTED = ("redact", "privacy", "private", "proxy", "withheld", "not disclosed", "data protected", "gdpr",
+             "whoisguard", "domains by proxy", "contact privacy", "perfect privacy", "please query", "statutory masking")
+
+
+def _registrant(ent: Dict) -> Dict[str, Any]:
+    """Public registrant fields from an RDAP entity. Privacy-service / redacted values are flagged, never trusted."""
+    vals: Dict[str, Any] = {"name": None, "org": None, "email": None, "country": None}
+    vcard = ent.get("vcardArray")
+    for item in (vcard[1] if isinstance(vcard, list) and len(vcard) > 1 else []):
+        if not (isinstance(item, list) and len(item) > 3):
+            continue
+        key, value = item[0], item[3]
+        if key == "fn" and isinstance(value, str):
+            vals["name"] = value.strip() or None
+        elif key == "org":
+            vals["org"] = (value if isinstance(value, str) else " ".join(map(str, value))).strip() or None
+        elif key == "email" and isinstance(value, str):
+            vals["email"] = value.strip() or None
+        elif key == "adr":
+            label = (item[1] or {}).get("cc") if isinstance(item[1], dict) else None
+            parts = [p for p in value if isinstance(p, str) and p.strip()] if isinstance(value, list) else []
+            vals["country"] = label or (parts[-1] if parts else None)
+    text = " ".join(str(v) for v in vals.values() if v).lower()
+    vals["redacted"] = (not any(vals[k] for k in ("name", "org", "email"))) or any(w in text for w in _REDACTED)
+    return vals
+
+
 def rdap_lookup(domain: str, timeout: int = 10) -> Optional[Dict]:
     """Registration date, registrar and abuse e-mail for a registrable domain (None if unavailable)."""
     domain = registrable_domain(domain) or domain
@@ -324,9 +440,13 @@ def rdap_lookup(domain: str, timeout: int = 10) -> Optional[Dict]:
                 out["registrar"] = _vcard_value(ent, "fn")
             if "abuse" in roles and not out["abuse_email"]:
                 out["abuse_email"] = _vcard_value(ent, "email")
+            if "registrant" in roles and "registrant" not in out:
+                out["registrant"] = _registrant(ent)
             walk(ent.get("entities"))
 
     walk(data.get("entities"))
+    out["nameservers"] = sorted({str(n.get("ldhName") or "").lower().rstrip(".") for n in data.get("nameservers") or [] if n.get("ldhName")})
+    out["statuses"] = [str(s) for s in (data.get("status") or [])][:8]
     if out["created"]:
         try:
             created = datetime.fromisoformat(out["created"].replace("Z", "+00:00"))
@@ -336,6 +456,105 @@ def rdap_lookup(domain: str, timeout: int = 10) -> Optional[Dict]:
         except ValueError:
             pass
     return out
+
+
+_REG_CACHE: Dict[str, Tuple[float, Optional[Dict]]] = {}
+_REG_CACHE_LOCK = threading.Lock()
+
+
+def _whois_raw(server: str, query: str, timeout: int = 8) -> str:
+    try:
+        with socket.create_connection((server, 43), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall((query + "\r\n").encode("utf-8"))
+            chunks: List[bytes] = []
+            while True:
+                buf = sock.recv(4096)
+                if not buf:
+                    break
+                chunks.append(buf)
+                if sum(len(c) for c in chunks) > 65536:
+                    break
+            return b"".join(chunks).decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def whois_lookup(domain: str, timeout: int = 8) -> Optional[Dict]:
+    """Port-43 WHOIS fallback for ccTLDs/registrars missing public RDAP endpoints."""
+    import re
+
+    dom = registrable_domain(domain) or normalize_host(domain)
+    if not dom or "." not in dom:
+        return None
+    iana = _whois_raw("whois.iana.org", dom, timeout=timeout)
+    ref_match = re.search(r"refer:\s*(\S+)", iana, re.I)
+    server = ref_match.group(1).strip() if ref_match else ""
+    if not server:
+        return None
+    query = f"={dom}" if "verisign-grs" in server.lower() else dom
+    raw = _whois_raw(server, query, timeout=timeout)
+    if not raw or "no match" in raw.lower() or "not found" in raw.lower():
+        return None
+
+    def first_field(*patterns: str) -> Optional[str]:
+        for pat in patterns:
+            m = re.search(pat, raw, re.I | re.M)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+        return None
+
+    created_raw = first_field(r"Creation Date:\s*(.+)", r"Created On:\s*(.+)", r"Registered on:\s*(.+)")
+    expires_raw = first_field(r"Registry Expiry Date:\s*(.+)", r"Expiration Date:\s*(.+)", r"Expires on:\s*(.+)")
+    registrar = first_field(r"Registrar:\s*(.+)", r"Sponsoring Registrar:\s*(.+)")
+    abuse_email = first_field(r"Registrar Abuse Contact Email:\s*([^\s,;]+)", r"Abuse Email:\s*([^\s,;]+)")
+    if not any((created_raw, expires_raw, registrar, abuse_email)):
+        return None
+
+    age_days: Optional[int] = None
+    if created_raw:
+        date_part = created_raw.split()[0].split("T")[0]
+        try:
+            dt = datetime.fromisoformat(date_part).replace(tzinfo=timezone.utc)
+            age_days = max(0, (datetime.now(timezone.utc) - dt).days)
+        except ValueError:
+            pass
+
+    return {
+        "created": created_raw, "expires": expires_raw, "updated": None,
+        "registrar": registrar, "abuse_email": abuse_email, "age_days": age_days,
+    }
+
+
+def registration_lookup(domain: str, timeout: int = 10) -> Optional[Dict]:
+    """
+    Cached registration lookup combining IANA RDAP first with Port-43 WHOIS fallback.
+    """
+    dom = registrable_domain(domain) or normalize_host(domain)
+    if not dom:
+        return None
+    now = time.monotonic()
+    with _REG_CACHE_LOCK:
+        hit = _REG_CACHE.get(dom)
+        if hit and now - hit[0] < 1800:
+            return hit[1]
+
+    info = rdap_lookup(dom, timeout=timeout)
+    if info is None or (not info.get("created") and not info.get("registrar")):
+        fallback = whois_lookup(dom, timeout=min(timeout, 8))
+        if fallback:
+            if info is None:
+                info = fallback
+            else:
+                for k, v in fallback.items():
+                    if not info.get(k) and v is not None:
+                        info[k] = v
+
+    with _REG_CACHE_LOCK:
+        if len(_REG_CACHE) > 512:
+            _REG_CACHE.clear()
+        _REG_CACHE[dom] = (now, info)
+    return info
 
 
 # ============================================================== Brand allowlist

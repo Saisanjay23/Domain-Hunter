@@ -105,6 +105,8 @@ class TestSettingsApi(EnvSandbox):
         self.assertEqual(r.status_code, 403)
         self.assertFalse(os.path.exists(self.path))
 
+    @mock.patch.dict(os.environ, {"FREE_ONLY_MODE": "0"})  # exercises the paid-platform path
+
     def test_save_status_and_remove(self):
         with self.local():
             r = self.client.put("/api/settings/keys", json={"values": {"SHODAN_API_KEY": SECRET}})

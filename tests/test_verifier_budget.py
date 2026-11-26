@@ -1,8 +1,10 @@
 """A server that trickles its response must not hold an inspection worker beyond the per-site budget."""
+import os
 import socket
 import threading
 import time
 import unittest
+from unittest import mock
 
 from core.crawler import FaviconCrawler
 from core.verifier import verify_candidate
@@ -52,6 +54,12 @@ class SlowDripServer:
 
 
 class TestSiteBudget(unittest.TestCase):
+    def setUp(self):
+        # this test talks to a server on 127.0.0.1 on purpose; the SSRF guard blocks loopback unless opted in
+        env = mock.patch.dict(os.environ, {"BRAND_HUNTER_ALLOW_PRIVATE_FETCH": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_slow_server_is_cut_off_at_the_budget(self):
         server = SlowDripServer()
         self.addCleanup(server.close)

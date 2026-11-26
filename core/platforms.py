@@ -38,9 +38,6 @@ CENSYS_FAVICON_MD5_FIELDS = (
 )
 CENSYS_FAVICON_SHA256_FIELD = "web.endpoints.http.favicons.hash_sha256"
 
-# Censys only hashes the first 384 KB of a favicon.
-CENSYS_FAVICON_MAX_BYTES = 384 * 1024
-
 
 def build_fofa_search_url(query: str) -> str:
     """Direct FOFA result URL (query is base64 encoded)."""
@@ -68,16 +65,37 @@ def build_crtsh_search_url(pattern: str, exclude_expired: bool = False) -> str:
     return url + ("&exclude=expired" if exclude_expired else "")
 
 
+def build_whoisxml_search_url(_query: str = "") -> str:
+    """WhoisXML Brand Alert / Domain Discovery console."""
+    return "https://brand-alert.whoisxmlapi.com/"
+
+
 URL_BUILDERS = {
     "fofa": build_fofa_search_url,
     "shodan": build_shodan_search_url,
     "censys": build_censys_search_url,
     "urlscan": build_urlscan_search_url,
+    "whoisxml": build_whoisxml_search_url,
 }
 
 
 def build_search_url(platform: str, query: str) -> str:
-    return URL_BUILDERS[platform](query)
+    builder = URL_BUILDERS.get(platform)
+    return builder(query) if builder else ""
+
+
+def quote_term(value: str) -> str:
+    """Double-quote a value for FOFA / URLScan / Shodan query strings."""
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def urlscan_exclude_clause(allowlist) -> str:
+    """Returns ' AND NOT page.apexDomain:...' excluding up to 10 own brand domains."""
+    own = [d for d in (allowlist or []) if d][:10]
+    if not own:
+        return ""
+    expr = f"({' OR '.join(own)})" if len(own) > 1 else own[0]
+    return f" AND NOT page.apexDomain:{expr}"
 
 
 def cenql_quote(value: str) -> str:

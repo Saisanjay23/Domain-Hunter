@@ -1,3 +1,4 @@
+import base64
 import codecs
 import hashlib
 import re
@@ -143,6 +144,31 @@ def get_image_metadata(content: bytes) -> Dict[str, Any]:
             except Exception:
                 pass
     return meta
+
+
+_MIME_BY_FORMAT = {
+    "ICO": "image/x-icon",
+    "CUR": "image/x-icon",
+    "PNG": "image/png",
+    "GIF": "image/gif",
+    "JPEG": "image/jpeg",
+    "MPO": "image/jpeg",
+    "BMP": "image/bmp",
+    "WEBP": "image/webp",
+    "SVG": "image/svg+xml",
+    "AVIF": "image/avif",
+}
+
+
+def make_preview_data_uri(content: bytes, fmt: Optional[str] = None, max_bytes: int = 512 * 1024) -> Optional[str]:
+    """Encodes image bytes as a safe data: URI so the UI never hotlinks suspect hosts."""
+    if not content or len(content) > max_bytes:
+        return None
+    detected = (fmt or sniff_image_format(content) or "").upper()
+    mime = _MIME_BY_FORMAT.get(detected)
+    if not mime:
+        return None
+    return f"data:{mime};base64,{base64.b64encode(content).decode('ascii')}"
 
 
 def analyze_icon_bytes(content: bytes) -> Dict[str, Any]:

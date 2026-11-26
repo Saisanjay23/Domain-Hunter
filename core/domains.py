@@ -61,3 +61,8 @@ def same_organization(host_a: str, host_b: str) -> bool:
     """True if both hosts share the same registrable domain."""
     ra, rb = registrable_domain(host_a), registrable_domain(host_b)
     return bool(ra and rb and ra == rb)
+
+
+def defang(value: str) -> str:
+    """Defangs a domain or URL (http -> hxxp, . -> [.]) for safe indicator sharing."""
+    return (value or "").replace("http", "hxxp").replace(".", "[.]")

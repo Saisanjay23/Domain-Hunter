@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import requests
 
 from .discovery import HTTP_HEADERS, _vcard_value, rdap_lookup
+from .domains import defang
 
 _IP_BOOTSTRAP: Dict[str, List] = {}
 _IP_LOCK = threading.Lock()
@@ -36,10 +37,6 @@ REPORT_CHANNELS = [
 ]
 
 CDN_FORMS = (("cloudflare", "Cloudflare abuse form", "https://abuse.cloudflare.com/"),)
-
-
-def defang(value: str) -> str:
-    return (value or "").replace("http", "hxxp").replace(".", "[.]")
 
 
 def _utc(ts: Optional[float] = None) -> str:

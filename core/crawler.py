@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 
 from .hasher import analyze_icon_bytes, is_image_bytes
 from .domains import normalize_host, registrable_domain, same_organization
+from .netguard import PublicOnlyAdapter
 
 # Suppress InsecureRequestWarning when fallback is triggered
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -32,6 +33,7 @@ MAX_ASSET_BYTES = 5 * 1024 * 1024
 MAX_LOGO_CANDIDATES = 6
 MAX_IMG_LOGOS = 3
 
+ANALYTICS_RE = re.compile(r"\b(UA-\d{4,10}-\d{1,4}|G-[A-Z0-9]{8,12}|GTM-[A-Z0-9]{5,9}|AW-\d{8,12})\b")
 ICON_REL_TOKENS = {"icon", "apple-touch-icon", "apple-touch-icon-precomposed", "mask-icon", "fluid-icon"}
 SMALL_ICON_SIZES = ("16x16", "32x32", "48x48")
 
@@ -96,7 +98,8 @@ class FaviconCrawler:
         self.max_workers = max_workers
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": self.user_agent, **DEFAULT_HEADERS})
-        adapter = requests.adapters.HTTPAdapter(pool_connections=max_workers * 2, pool_maxsize=max_workers * 2)
+        # PublicOnlyAdapter: never connect to loopback / private / link-local addresses (SSRF via lookalike DNS or redirects)
+        adapter = PublicOnlyAdapter(pool_connections=max_workers * 2, pool_maxsize=max_workers * 2)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 

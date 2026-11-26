@@ -15,9 +15,11 @@ from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 
 from . import config
+from .crawler import ANALYTICS_RE
 from .domains import registrable_domain
+from .dorks import FREE_HOSTING, ENGINES, APP_STORES, PASTE_SITES, SOCIAL, build_urlscan_daily_queries, build_whoisxml_daily_spec
 from .hasher import sha256_hash
-from .platforms import build_search_url
+from .platforms import build_search_url, quote_term, urlscan_exclude_clause
 
 MAX_ASSETS = 6
 MAX_ASSET_BYTES = 3 * 1024 * 1024
@@ -31,26 +33,6 @@ GENERIC_ASSET_RE = re.compile(
     r"utag|qualtrics|zendesk|intercom|hubspot|osano|trustarc|consent)",
     re.I,
 )
-ANALYTICS_RE = re.compile(r"\b(UA-\d{4,10}-\d{1,4}|G-[A-Z0-9]{8,12}|GTM-[A-Z0-9]{5,9}|AW-\d{8,12})\b")
-
-FREE_HOSTING = [
-    "pages.dev", "workers.dev", "r2.dev", "netlify.app", "vercel.app", "web.app", "firebaseapp.com", "github.io",
-    "gitlab.io", "herokuapp.com", "onrender.com", "glitch.me", "replit.app", "repl.co", "blogspot.com",
-    "wordpress.com", "wixsite.com", "weebly.com", "webflow.io", "square.site", "godaddysites.com", "framer.app",
-    "carrd.co", "notion.site", "myshopify.com", "000webhostapp.com", "ngrok-free.app", "ngrok.io", "azurewebsites.net",
-    "web.core.windows.net", "s3.amazonaws.com", "ipfs.io", "dweb.link", "surge.sh", "fly.dev", "translate.goog",
-    "trycloudflare.com", "canva.site", "duckdns.org", "ddns.net",
-]
-SOCIAL = ["facebook.com", "instagram.com", "x.com", "twitter.com", "t.me", "linkedin.com", "youtube.com", "tiktok.com", "whatsapp.com"]
-APP_STORES = ["play.google.com", "apps.apple.com", "apkpure.com", "apkcombo.com", "uptodown.com", "apkmirror.com"]
-PASTE_SITES = ["pastebin.com", "paste.ee", "justpaste.it", "rentry.co", "ghostbin.site", "controlc.com"]
-
-ENGINES = {
-    "google": "https://www.google.com/search?q={}",
-    "bing": "https://www.bing.com/search?q={}",
-    "duckduckgo": "https://duckduckgo.com/?q={}",
-    "yandex": "https://yandex.com/search/?text={}",
-}
 
 
 # ------------------------------------------------------------------ brand pivots
@@ -87,33 +69,27 @@ def extract_asset_pivots(soup: Optional[BeautifulSoup], page_url: str, allowlist
     return out
 
 
-def _q(v: str) -> str:
-    return '"' + v.replace('"', '\\"') + '"'
-
-
-def _urlscan_exclude(allowlist: List[str]) -> str:
-    own = allowlist[:10]
-    if not own:
-        return ""
-    return " AND NOT page.apexDomain:" + (f"({' OR '.join(own)})" if len(own) > 1 else own[0])
-
-
 def pivot_queries(pivots: Dict[str, Any], allowlist: List[str]) -> List[Dict[str, str]]:
     """Copy-ready queries for the analytics IDs and asset hashes (with search links)."""
     out: List[Dict[str, str]] = []
     legit = allowlist[0] if allowlist else ""
+    excl_u = urlscan_exclude_clause(allowlist)
 
     def add(platform, label, query):
         out.append({"platform": platform, "label": label, "query": query, "url": build_search_url(platform, query)})
 
     for gid in pivots.get("analytics", [])[:4]:
-        add("fofa", f"Analytics {gid}", f'body={_q(gid)}' + "".join(f' && domain!="{d}"' for d in allowlist[:5]))
-        add("shodan", f"Analytics {gid}", f"http.html:{_q(gid)}" + (f" -hostname:{legit}" if legit else ""))
-        add("urlscan", f"Analytics {gid} (Pro: page text)", f"text.content:{_q(gid)}" + _urlscan_exclude(allowlist))
+        add("fofa", f"Analytics {gid}", f'body={quote_term(gid)}' + "".join(f' && domain!="{d}"' for d in allowlist[:5]))
+        add("shodan", f"Analytics {gid}", f"http.html:{quote_term(gid)}" + (f" -hostname:{legit}" if legit else ""))
+        add("urlscan", f"Analytics {gid} (Pro: page text)", f"text.content:{quote_term(gid)}" + excl_u)
+        out.append({
+            "platform": "publicwww", "label": f"PublicWWW source match ({gid})",
+            "query": f'"{gid}"', "url": f"https://publicwww.com/web/{urllib.parse.quote(f'\"{gid}\"')}/",
+        })
     hashes = [a["sha256"] for a in pivots.get("assets", [])]
     if hashes:
         q = ("hash:" + hashes[0]) if len(hashes) == 1 else "hash:(" + " OR ".join(hashes) + ")"
-        add("urlscan", f"Brand JS/CSS files ({len(hashes)})", q + _urlscan_exclude(allowlist))
+        add("urlscan", f"Brand JS/CSS files ({len(hashes)})", q + excl_u)
     return out
 
 
@@ -128,7 +104,7 @@ def _chunks(items: List[str], n: int) -> List[List[str]]:
 
 def search_engine_dorks(domain: str, brand: str, tokens: List[str]) -> List[Dict[str, Any]]:
     """Grouped search-engine dorks; each has a ready link per engine (opened by the analyst, never scraped)."""
-    b = _q(brand)
+    b = quote_term(brand)
     not_own = f"-site:{domain}"
     tok = next((t for t in tokens if len(t) >= 4), brand.lower())
     groups: Dict[str, List[str]] = {
@@ -138,7 +114,14 @@ def search_engine_dorks(domain: str, brand: str, tokens: List[str]) -> List[Dict
             f"inurl:{tok} (login OR signin OR secure OR verify) {not_own}",
             f"\"{domain}\" {not_own} -site:linkedin.com -site:wikipedia.org",
         ],
-        "Free hosting & site builders": [f"{b} {_sites(c)}" for c in _chunks(FREE_HOSTING, 9)],
+        "Free hosting & site builders": [
+            f"{b} (site:workers.dev OR site:web.app OR site:vercel.app OR site:pages.dev OR site:netlify.app)",
+            *[f"{b} {_sites(c)}" for c in _chunks(FREE_HOSTING, 9)],
+        ],
+        "Subdomain & Login Dorks": [
+            f"inurl:{tok} (inurl:login OR inurl:sso OR inurl:portal) {not_own}",
+            f"site:{tok}.* {not_own}",
+        ],
         "Fake recruitment & helplines": [
             f"{b} (\"offer letter\" OR \"job offer\" OR recruitment OR \"registration fee\") {not_own}",
             f"{b} (\"customer care number\" OR helpline OR \"toll free\" OR refund) {not_own}",
@@ -169,22 +152,23 @@ def build_intel_plan(
     allowlist: List[str],
     brand: str,
     tokens: List[str],
+    brand_titles: Optional[List[str]] = None,
 ) -> List[Dict[str, str]]:
     """
     Queries to run automatically: {"source", "match", "label", "query"}.
-    match = favicon_hash | asset_hash | analytics | dork | hosting
+    match = favicon_hash | asset_hash | analytics | dork | hosting | daily_domain | daily_title | whoisxml_brand | whoisxml_discovery
     """
     plan: List[Dict[str, str]] = []
     legit = allowlist[0] if allowlist else ""
-    excl_u = _urlscan_exclude(allowlist)
+    excl_u = urlscan_exclude_clause(allowlist)
 
-    def add(source, match, label, query):
+    def add(source, match, label, query, fallback=None):
+        """fallback: a cheaper query to run when the platform plan rejects this one (see hunter.run_intel)."""
+        if config.is_paid(source) and config.free_only():
+            return  # free mode: paid platforms are never queried
         if query:
-            plan.append({"source": source, "match": match, "label": label, "query": query})
+            plan.append({"source": source, "match": match, "label": label, "query": query, **({"fallback": fallback} if fallback else {})})
 
-    # URLScan indexes the hash of every response a scanned page loads. Images (favicon, logo) are brand-specific
-    # by nature: a strong signal. JS/CSS files are queried separately and score weakly, because themes and
-    # plugins (WordPress, Wix, ...) ship the same files to thousands of unrelated sites.
     def hash_query(hashes):
         return ("hash:" + hashes[0]) if len(hashes) == 1 else "hash:(" + " OR ".join(hashes) + ")"
 
@@ -194,14 +178,57 @@ def build_intel_plan(
     code_hashes = list(dict.fromkeys(a["sha256"] for a in pivots.get("assets", []) if a["sha256"] not in image_hashes))[:25]
     if code_hashes:
         add("urlscan", "code_hash", "Pages loading the brand's rare JS/CSS files", hash_query(code_hashes) + excl_u)
+
+    has_urlscan_key = bool(config.get("URLSCAN_API_KEY"))
+    titles_for_daily = brand_titles or [brand]
+    daily_us = build_urlscan_daily_queries(tokens, titles_for_daily, allowlist, hours=24, has_key=has_urlscan_key)
+    add("urlscan", "daily_domain", "Daily scan (24h): page.domain keyword match", daily_us.get("domain_query"))
+    add("urlscan", "daily_title", "Daily scan (24h): page.title brand-title match", daily_us.get("title_query"))
+
     add("urlscan", "dork", "Lookalike domains", (dorks.get("urlscan") or {}).get("domain_wildcard"))
+    add("urlscan", "subdomain_spoof", "Subdomain impersonations (keyword.*)", (dorks.get("urlscan") or {}).get("subdomain_spoof"))
+    # Evaluate additional analyst tokens independently for subdomain & domain-wildcard coverage
+    seen_urlscan_sub = {(dorks.get("urlscan") or {}).get("subdomain_spoof")}
+    for tok in tokens[1:9]:  # every analyst keyword, not just the first few forms
+        t = (tok or "").strip().lower()
+        if len(t) >= 4:
+            sub_q = f"page.domain:{t}*{excl_u}"  # prefix match only: a leading wildcard needs a higher URLScan plan
+            if sub_q not in seen_urlscan_sub:
+                seen_urlscan_sub.add(sub_q)
+                add("urlscan", "subdomain_spoof", f"Keyword '{tok}': subdomain & host clones", sub_q)
+
     add("urlscan", "dork", "Domain / URL token match", (dorks.get("urlscan") or {}).get("url_prefix"))
-    if config.get("URLSCAN_API_KEY"):
+    if has_urlscan_key and not config.free_only():  # substring search needs a paid URLScan plan
         add("urlscan", "dork", "All domains containing brand (key)", (dorks.get("urlscan") or {}).get("all_domains"))
     add("urlscan", "dork", "Brand in page title", (dorks.get("urlscan") or {}).get("title_spoof"))
     hosting = " OR ".join(f"page.domain:{h}" for h in FREE_HOSTING[:20])
-    brand_terms = " OR ".join([f"page.title:{_q(brand)}"] + [f"page.domain:{t}*" for t in tokens[:3]])
+    brand_terms = " OR ".join([f"page.title:{quote_term(brand)}"] + [f"page.domain:{t}*" for t in tokens[:6]])
     add("urlscan", "hosting", "Brand on free hosting / site builders", f"({hosting}) AND ({brand_terms})")
+
+    # Free Search-Engine & Archive Dork Automation (Bing RSS, DuckDuckGo, Wayback CDX)
+    not_own = " ".join(f"-site:{d}" for d in allowlist[:4])
+    b_toks = [t for t in tokens if len(t) >= 4][:5] or [brand]
+    if b_toks:
+        bing_title = f'intitle:"{brand}" {not_own}'.strip()
+        add("bing", "dork", f"Bing web search: cloned title for {brand}", bing_title)
+        bing_sub = f"({' OR '.join(f'inurl:{t}' for t in b_toks[:4])}) (inurl:login OR inurl:portal OR inurl:sso OR site:workers.dev OR site:vercel.app) {not_own}".strip()
+        add("bing", "dork", "Bing dork: login & free-hosting impersonations", bing_sub)
+        ddg_q = f'("{brand}" OR {" OR ".join(f"inurl:{t}" for t in b_toks[:3])}) {not_own}'.strip()
+        add("duckduckgo", "dork", f"DuckDuckGo search: {b_toks[0]} mentions outside official site", ddg_q)
+    for tok in b_toks[:3]:
+        add("wayback", "hosting", f"Wayback CDX: workers.dev pages containing '{tok}'", f"*.workers.dev/*{tok}*")
+
+    # Optional VirusTotal discovery (runs automatically when VIRUSTOTAL_API_KEY is configured)
+    if config.is_enabled("virustotal"):
+        for tok in b_toks[:4]:
+            add("virustotal", "dork", f"VirusTotal search for '{tok}'", tok)
+
+    # Optional WhoisXML engine (only scheduled when a key is configured)
+    if config.is_enabled("whoisxml"):
+        add("whoisxml", "whoisxml_brand", "Daily newly registered / updated lookalikes & typos (Brand Alert)",
+            build_whoisxml_daily_spec(tokens, allowlist, since_days=1, with_typos=True, mode="brand_alert"))
+        add("whoisxml", "whoisxml_discovery", "Newly discovered domains containing brand keyword",
+            build_whoisxml_daily_spec(tokens, allowlist, since_days=1, with_typos=False, mode="domain_discovery"))
 
     # Favicon-hash engines
     if combined_hash_queries.get("shodan"):
@@ -216,14 +243,15 @@ def build_intel_plan(
     # Title / host / cert dorks
     add("shodan", "dork", "Brand in page title", (dorks.get("shodan") or {}).get("title_spoof"))
     add("shodan", "dork", "Lookalike TLS certificate CN", (dorks.get("shodan") or {}).get("cert_wildcard"))
-    add("fofa", "dork", "Lookalike titles / hosts / certs", (dorks.get("fofa") or {}).get("master"))
+    add("fofa", "dork", "Lookalike titles / hosts / certs", (dorks.get("fofa") or {}).get("master"),
+        fallback=(dorks.get("fofa") or {}).get("domain_wildcard"))
     censys_dork = (dorks.get("censys") or {}).get("master") or (dorks.get("censys") or {}).get("title_spoof")
     add("censys", "dork", "Lookalike titles / hosts / certs", censys_dork)
 
     # Analytics-ID pivots (cloned kits keep the brand's tracking code)
     for gid in pivots.get("analytics", [])[:2]:
-        add("shodan", "analytics", f"HTML contains {gid}", f"http.html:{_q(gid)}" + (f" -hostname:{legit}" if legit else ""))
-        add("fofa", "analytics", f"Body contains {gid}", f"body={_q(gid)}" + "".join(f' && domain!="{d}"' for d in allowlist[:5]))
+        add("shodan", "analytics", f"HTML contains {gid}", f"http.html:{quote_term(gid)}" + (f" -hostname:{legit}" if legit else ""))
+        add("fofa", "analytics", f"Body contains {gid}", f"body={quote_term(gid)}" + "".join(f' && domain!="{d}"' for d in allowlist[:5]))
     return plan
 
 

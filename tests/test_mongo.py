@@ -1,23 +1,26 @@
 """
-MongoDB storage: one contract suite run against SQLite, MongoDB (mongomock) and, optionally, a real server;
-plus connection settings, backend switching, migration, redaction and the storage API.
+MongoDB storage: one contract suite run against MongoDB (mongomock) and, optionally, a real server;
+plus connection settings, connection switching, legacy SQLite import, redaction and the storage API.
 
 Run the live variant against a real MongoDB with:
     BRAND_HUNTER_TEST_MONGO_URI=mongodb://127.0.0.1:27017 python -m pytest tests/test_mongo.py
 A throwaway database (bih_test_<random>) is created and dropped.
 """
+import json
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
 import uuid
+import zlib
 from unittest import mock
 
 import mongomock
 
 from core import config, migrate, mongostore, store as store_mod
 from core.mongostore import MongoStore, describe_uri, redact
-from core.store import Store, StoreError, StoreUnavailable, get_store
+from core.store import DEFAULT_MONGODB_URI, StoreError, StoreUnavailable, get_store
 from test_settings import EnvSandbox
 
 try:
@@ -37,6 +40,37 @@ def cand(domain, score=80, verdict="phishing", **kw):
 def result(target="paypal.com", cands=None, **extra):
     return {"target": target, "depth": "quick", "stats": {"registered": len(cands or []), **extra.pop("stats", {})},
             "candidates": cands or [], **extra}
+
+LEGACY_SCHEMA = """
+CREATE TABLE hunts (id TEXT PRIMARY KEY, target TEXT NOT NULL, created REAL NOT NULL, depth TEXT, high_risk INTEGER DEFAULT 0,
+    suspicious INTEGER DEFAULT 0, registered INTEGER DEFAULT 0, new_count INTEGER DEFAULT 0, scheduled INTEGER DEFAULT 0, result BLOB NOT NULL);
+CREATE TABLE hunt_candidates (hunt_id TEXT NOT NULL, domain TEXT NOT NULL, score INTEGER, verdict TEXT, PRIMARY KEY (hunt_id, domain));
+CREATE TABLE triage (brand TEXT NOT NULL, domain TEXT NOT NULL, status TEXT NOT NULL, note TEXT DEFAULT '', updated REAL NOT NULL, PRIMARY KEY (brand, domain));
+CREATE TABLE watchlist (id INTEGER PRIMARY KEY AUTOINCREMENT, brand TEXT UNIQUE NOT NULL, depth TEXT DEFAULT 'standard',
+    interval_hours INTEGER DEFAULT 24, min_score INTEGER DEFAULT 45, webhook_url TEXT DEFAULT '', enabled INTEGER DEFAULT 1,
+    allowlist TEXT DEFAULT '', last_run REAL, last_hunt TEXT, last_status TEXT, created REAL NOT NULL);
+CREATE TABLE alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, created REAL NOT NULL, brand TEXT, level TEXT, title TEXT,
+    body TEXT, hunt_id TEXT, read INTEGER DEFAULT 0, delivery TEXT DEFAULT '');
+"""
+
+
+def write_legacy_db(path):
+    """A SQLite file exactly as the retired SQLite backend wrote it."""
+    db = sqlite3.connect(path)
+    db.executescript(LEGACY_SCHEMA)
+    for hid, res, created, sched in (("h1", result(cands=[cand("a.com", 90), cand("b.com", 20, "no_website")], stats={"high_risk": 1}), time.time() - 500, 0),
+                                     ("h2", result(cands=[cand("a.com", 90)]), time.time(), 1)):
+        res = dict(res, hunt_id=hid, created=created)
+        db.execute("INSERT INTO hunts(id,target,created,depth,scheduled,result) VALUES(?,?,?,?,?,?)",
+                   (hid, res["target"], created, "quick", sched, zlib.compress(json.dumps(res).encode(), 6)))
+        db.executemany("INSERT INTO hunt_candidates VALUES(?,?,?,?)", [(hid, c["domain"], c["score"], c["verdict"]) for c in res["candidates"]])
+    db.execute("INSERT INTO triage VALUES('paypal.com','a.com','confirmed','seen live',1700000000.0)")
+    db.execute("INSERT INTO watchlist(brand,depth,interval_hours,min_score,webhook_url,enabled,allowlist,last_run,last_hunt,last_status,created) "
+               "VALUES('paypal.com','quick',6,45,'https://hooks.example/SECRET',0,'paypal.me',1700000100.0,'h2','ok',1700000000.0)")
+    db.execute("INSERT INTO alerts(created,brand,level,title,body,hunt_id,read,delivery) "
+               "VALUES(1700000200.0,'paypal.com','high','alert one','body','h2',1,'webhook: delivered')")
+    db.commit()
+    db.close()
 
 
 # ============================================================== the contract every backend must satisfy
@@ -86,7 +120,7 @@ class StoreContract:
         self.s.save_hunt("h1", r)
         got = self.s.get_hunt("h1")
         self.assertEqual(sorted(got["candidates"][0]["tags"]), ["x", "y"])
-        self.assertIn("domain_wildcard", got["dorks"]["fofa"]) if self.s.backend == "mongodb" else self.assertIn("domain.wildcard", got["dorks"]["fofa"])
+        self.assertIn("domain_wildcard", got["dorks"]["fofa"])
 
     def test_previews_trimmed_to_top_candidates(self):
         many = [cand(f"d{i}.com", score=i, evidence={"preview": "data:image/png;base64,AAAA"}) for i in range(60)]
@@ -147,15 +181,6 @@ class StoreContract:
         self.assertEqual(self.s.alert_list()[1]["delivery"], "delivered")
 
 
-class TestSQLiteContract(StoreContract, unittest.TestCase):
-    def make_store(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        s = Store(os.path.join(self._tmp.name, "c.db"))
-        self.addCleanup(s.close)
-        return s
-
-
 class TestMongoMockContract(StoreContract, unittest.TestCase):
     def make_store(self):
         return MongoStore(mongomock.MongoClient(), f"bih_{uuid.uuid4().hex[:8]}")
@@ -213,7 +238,7 @@ class TestBackendSelection(EnvSandbox):
         self.addCleanup(lambda: store_mod.set_store(None))
 
     def tearDown(self):
-        store_mod.close_all()      # release SQLite files before the temp directory is removed (Windows)
+        store_mod.close_all()
         store_mod.set_store(None)
         super().tearDown()
 
@@ -232,18 +257,25 @@ class TestBackendSelection(EnvSandbox):
             config.add_key("MONGODB_URI", "mongodb://another")                  # not a rotation list
 
     def test_switches_with_the_configuration_and_caches_failures(self):
-        local = get_store()
-        self.assertEqual(local.backend, "sqlite")
-        self.assertIs(get_store(), local)                                       # cached
+        built = []
 
-        fake = MongoStore(mongomock.MongoClient(), "bih_sel")
-        with mock.patch.object(mongostore, "connect_mongo", return_value=fake) as connect:
+        def fake_connect(uri, db=None):
+            built.append((uri, db))
+            return MongoStore(mongomock.MongoClient(), db or "brand_hunter")
+
+        with mock.patch.object(mongostore, "connect_mongo", side_effect=fake_connect):
+            local = get_store()
+            self.assertEqual(local.backend, "mongodb")
+            self.assertEqual(built[-1], (DEFAULT_MONGODB_URI, None))              # no URI configured: the local default server
+            self.assertIs(get_store(), local)                                    # cached
             config.save_keys({"MONGODB_URI": "mongodb://127.0.0.1:27017", "MONGODB_DB": "bih_sel"})
-            self.assertIs(get_store(), fake)
-            self.assertIs(get_store(), fake)
-            connect.assert_called_once_with("mongodb://127.0.0.1:27017", "bih_sel")
-            config.save_keys({"MONGODB_URI": ""})
-            self.assertEqual(get_store().backend, "sqlite")                     # removing the URI switches back
+            sel = get_store()
+            self.assertIsNot(sel, local)
+            self.assertEqual(built[-1], ("mongodb://127.0.0.1:27017", "bih_sel"))
+            self.assertIs(get_store(), sel)
+            config.save_keys({"MONGODB_URI": "", "MONGODB_DB": ""})
+            self.assertEqual(get_store().backend, "mongodb")                     # removing the URI: the default server, never SQLite
+            self.assertEqual(built[-1], (DEFAULT_MONGODB_URI, None))
 
         calls = []
 
@@ -263,36 +295,47 @@ class TestBackendSelection(EnvSandbox):
                 get_store()
             self.assertEqual(len(calls), 2)                                      # ...and retried after the back-off
 
-    def test_migration_both_ways_is_idempotent(self):
-        src = Store(os.path.join(self.db_dir.name, "src.db"))
-        self.addCleanup(src.close)
-        src.save_hunt("h1", result(cands=[cand("a.com", 90), cand("b.com", 20, "no_website")], stats={"high_risk": 1}), created=time.time() - 500)
-        src.save_hunt("h2", result(cands=[cand("a.com", 90)]), scheduled=True)
-        src.triage_set("paypal.com", "a.com", "confirmed", "seen live", updated=1700000000.0)
-        wid = src.watch_add("paypal.com", "quick", 6, 45, "https://hooks.example/SECRET", ["paypal.me"])
-        src.watch_update(wid, last_run=1700000100.0, last_hunt="h2", last_status="ok", enabled=False)
-        src.alert_add("paypal.com", "high", "alert one", "body", "h2", "webhook: delivered", created=1700000200.0, read=True)
-
+    def test_legacy_sqlite_import_backs_up_validates_and_is_idempotent(self):
+        path = os.path.join(self.db_dir.name, "local.db")
+        write_legacy_db(path)
+        before = open(path, "rb").read()
         dst = MongoStore(mongomock.MongoClient(), "bih_mig")
-        counts = migrate.copy_store(src, dst)
+        backups = os.path.join(self.db_dir.name, "backups")
+
+        rep = migrate.migrate_sqlite(path, dst, backup_dir=backups)
+        counts = rep["copied"]
         self.assertEqual((counts["hunts"], counts["triage"], counts["watchlist"], counts["alerts"]), (2, 1, 1, 1))
+        self.assertTrue(rep["validation"]["ok"], rep["validation"])
+        self.assertEqual(rep["validation"]["candidates"], {"source": 3, "destination": 3})
+        self.assertTrue(os.path.isfile(rep["backup"]["path"]))
+        self.assertEqual(rep["backup"]["counts"]["hunts"], 2)
+        self.assertEqual(open(path, "rb").read(), before)                         # the source is untouched (read-only)
+        self.assertFalse(rep["source_deleted"])
+
         self.assertEqual([h["id"] for h in dst.list_hunts()], ["h2", "h1"])
         self.assertTrue(dst.list_hunts()[0]["scheduled"])
+        self.assertEqual(dst.get_hunt("h1")["candidates"][0]["domain"], "a.com")
         self.assertEqual(dst.triage_get("paypal.com")["a.com"], {"status": "confirmed", "note": "seen live", "updated": 1700000000.0})
         w = dst.watch_list(include_secret=True)[0]
         self.assertEqual((w["webhook_url"], w["enabled"], w["last_status"], w["allowlist"]), ("https://hooks.example/SECRET", False, "ok", ["paypal.me"]))
         a = dst.alert_list()[0]
         self.assertEqual((a["title"], a["read"], a["created"]), ("alert one", True, 1700000200.0))
 
-        again = migrate.copy_store(src, dst)                                      # repeat: nothing duplicated
-        self.assertEqual((again["watchlist"], again["watchlist_skipped"], again["alerts_skipped"]), (0, 1, True))
-        self.assertEqual((len(dst.list_hunts()), len(dst.watch_list()), len(dst.alert_list())), (2, 1, 1))
+        again = migrate.migrate_sqlite(path, dst, backup_dir=backups)            # repeat: nothing duplicated
+        self.assertEqual((again["copied"]["watchlist"], again["copied"]["watchlist_skipped"], again["copied"]["alerts"],
+                          again["copied"]["alerts_skipped"]), (0, 1, 0, 1))
+        self.assertTrue(again["validation"]["ok"])
+        self.assertEqual((len(dst.list_hunts()), len(dst.watch_list()), len(dst.alert_list()), dst.stats()["candidates"]), (2, 1, 1, 3))
+        self.assertNotEqual(again["backup"]["path"], rep["backup"]["path"])      # a new backup every run, earlier ones kept
+        self.assertEqual(len(os.listdir(backups)), 2)
+        hist = migrate.migration_history(dst)
+        self.assertEqual((len(hist), hist[0]["runs"]), (1, 2))                    # one record per source checksum
 
-        back = Store(os.path.join(self.db_dir.name, "back.db"))
-        self.addCleanup(back.close)
-        migrate.copy_store(dst, back)
-        self.assertEqual(back.get_hunt("h1")["candidates"][0]["domain"], "a.com")
-        self.assertEqual(back.triage_get("paypal.com")["a.com"]["status"], "confirmed")
+    def test_legacy_import_refuses_a_non_mongodb_destination(self):
+        path = os.path.join(self.db_dir.name, "local.db")
+        write_legacy_db(path)
+        with self.assertRaises(StoreError):
+            migrate.migrate_sqlite(path, object(), backup_dir=os.path.join(self.db_dir.name, "b"))
 
 
 # ============================================================== API
@@ -322,14 +365,16 @@ class TestStorageApi(EnvSandbox):
             self.assertEqual(self.client.post("/api/storage/test", json={}).status_code, 403)
         self.assertEqual(self.client.put("/api/storage", json={"uri": "mongodb://x"}, headers={"Origin": "https://evil.example"}).status_code, 403)
 
-    def test_status_test_save_migrate_and_switch_back(self):
-        st = self.client.get("/api/storage").json()
-        self.assertEqual((st["configured"], st["active"], st["connected"]), ("sqlite", "sqlite", True))
+    def test_status_test_save_import_and_reset(self):
+        with mock.patch.object(mongostore, "connect_mongo", return_value=self.mongo) as connect:
+            st = self.client.get("/api/storage").json()
+            self.assertEqual((st["configured"], st["active"], st["connected"], st["explicit"]), ("mongodb", "mongodb", True, False))
+            connect.assert_called_with(DEFAULT_MONGODB_URI, None)
+            self.assertEqual(st["legacy"], [])
+            self.assertEqual(self.client.post("/api/storage/migrate", json={"direction": "from_sqlite"}).status_code, 400)  # nothing to import
+            self.assertEqual(self.client.post("/api/storage/migrate", json={"direction": "to_sqlite"}).status_code, 400)    # SQLite is gone
 
-        self.assertEqual(self.client.post("/api/storage/test", json={}).status_code, 400)           # nothing to test
         self.assertEqual(self.client.put("/api/storage", json={"uri": "http://nope"}).status_code, 400)
-        self.assertEqual(self.client.post("/api/storage/migrate", json={"direction": "to_mongodb"}).status_code, 400)  # not on Mongo yet
-
         uri = "mongodb://bob:TopSecret@db.example:27017/hunterdb"
         bad = {"ok": False, "message": "ServerSelectionTimeoutError: db.example:27017 timed out"}
         with mock.patch.object(app_module, "check_connection", return_value=bad):
@@ -338,11 +383,7 @@ class TestStorageApi(EnvSandbox):
             self.assertIn("timed out", r.json()["detail"])
         self.assertIsNone(config.get("MONGODB_URI"))                                                 # a broken URI is never saved
 
-        # put something in the local file so there is data to copy
-        local = Store(os.path.join(self.db_dir.name, "local.db"))
-        local.save_hunt("h1", result(cands=[cand("a.com", 90)]))
-        local.close()
-
+        write_legacy_db(os.path.join(self.db_dir.name, "local.db"))                                   # a legacy file to import
         good = {"ok": True, "message": "Connected to MongoDB 8.2.1. Database 'hunterdb' is writable.", "version": "8.2.1", "db": "hunterdb"}
         with mock.patch.object(app_module, "check_connection", return_value=good), \
                 mock.patch.object(mongostore, "connect_mongo", return_value=self.mongo):
@@ -350,21 +391,24 @@ class TestStorageApi(EnvSandbox):
             self.assertEqual(r.status_code, 200)
             self.assertNotIn("TopSecret", r.text)
             status = r.json()["status"]
-            self.assertEqual((status["configured"], status["active"], status["uri"]["hosts"], status["uri"]["database"]),
-                             ("mongodb", "mongodb", ["db.example:27017"], "hunterdb"))
-            self.assertEqual(status["sqlite"]["hunts"], 1)
+            self.assertEqual((status["configured"], status["explicit"], status["uri"]["hosts"], status["uri"]["database"]),
+                             ("mongodb", True, ["db.example:27017"], "hunterdb"))
+            self.assertEqual(status["legacy"][0]["counts"]["hunts"], 2)
             self.assertNotIn("TopSecret", self.client.get("/api/storage").text)
             self.assertNotIn("TopSecret", self.client.get("/api/settings/keys").text)               # settings page never leaks it either
 
-            self.assertEqual(self.client.get("/api/hunts").json()["hunts"], [])                      # empty MongoDB: history is per backend
-            m = self.client.post("/api/storage/migrate", json={"direction": "to_mongodb"}).json()
-            self.assertEqual(m["copied"]["hunts"], 1)
-            self.assertEqual(m["status"]["stats"]["hunts"], 1)
-            self.assertEqual([h["id"] for h in self.client.get("/api/hunts").json()["hunts"]], ["h1"])
-            self.assertEqual(self.client.post("/api/storage/migrate", json={"direction": "sideways"}).status_code, 400)
+            self.assertEqual(self.client.get("/api/hunts").json()["hunts"], [])
+            with mock.patch.object(config, "PROJECT_ROOT", self.db_dir.name):                       # backups go to the temp dir
+                m = self.client.post("/api/storage/migrate", json={"direction": "from_sqlite"}).json()
+            self.assertTrue(m["ok"], m)
+            self.assertEqual(m["copied"]["hunts"], 2)
+            self.assertEqual(m["status"]["stats"]["hunts"], 2)
+            self.assertTrue(m["reports"][0]["backup"]["path"].startswith(self.db_dir.name))
+            self.assertEqual(sorted(h["id"] for h in self.client.get("/api/hunts").json()["hunts"]), ["h1", "h2"])
+            self.assertTrue(os.path.isfile(os.path.join(self.db_dir.name, "local.db")))            # never deleted
 
             back = self.client.delete("/api/storage").json()
-            self.assertEqual((back["configured"], back["active"]), ("sqlite", "sqlite"))
+            self.assertEqual((back["configured"], back["explicit"]), ("mongodb", False))
 
     def test_unreachable_mongodb_gives_503_not_a_crash(self):
         def down(uri, db=None):

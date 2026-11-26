@@ -26,6 +26,10 @@ MAX_HITS_PER_FEED = 300
 MIN_TOKEN_LEN = 4
 
 FEEDS: Dict[str, Dict[str, Any]] = {
+    "nrd_free": {
+        "name": "Free Daily NRD", "kind": "domains", "ttl": 12 * 3600, "file": "nrd-1w.csv",
+        "url": "https://raw.githubusercontent.com/shreshta-labs/newly-registered-domains/main/nrd-1w.csv",
+    },
     "openphish": {
         "name": "OpenPhish", "kind": "urls", "ttl": 3600, "file": "openphish.txt",
         "url": "https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt",
@@ -115,7 +119,7 @@ def token_matches(host: str, token: str) -> bool:
     for label in host.split("."):
         if token not in label:
             continue
-        if label.startswith(token) or token in label.split("-"):
+        if label.startswith(token) or token in label.split("-") or (len(token) >= 4 and "-" in token and f"-{token}-" in f"-{label}-"):
             return True
         if label.endswith(token) and label[: -len(token)].replace("-", "") in LURE_PREFIXES:
             return True
@@ -179,8 +183,11 @@ def match(tokens: List[str], allowlist: List[str], force_refresh: bool = False) 
                 key = host if via == "path" else _candidate_key(host, usable)
                 url = line
             else:
-                host = normalize_host(line)
-                if not host or not host_matches(host, usable):
+                raw_dom = line.split(",", 1)[0].strip()
+                if raw_dom in ("domain", "domain_name", "domains"):
+                    continue
+                host = normalize_host(raw_dom)
+                if not host or "." not in host or not host_matches(host, usable):
                     continue
                 key, url, via = _candidate_key(host, usable), None, "host"
             if (registrable_domain(key) or key) in allowlist:

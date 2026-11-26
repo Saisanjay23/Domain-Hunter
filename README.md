@@ -8,6 +8,7 @@ It combines typosquat generation, Certificate Transparency, free phishing feeds,
 
 ```bash
 pip install -r requirements.txt
+# MongoDB must be running (local default mongodb://127.0.0.1:27017, or set MONGODB_URI)
 python favicon_hash.py --ui                          # web UI on http://127.0.0.1:8080
 python favicon_hash.py --hunt adani.com -o hunt.json -c hunt.csv      # or from the terminal
 ```
@@ -32,6 +33,67 @@ Beyond the ranked table, a hunt also returns favicon / logo hash queries and imp
 
 **Precision notes.** Favicon and logo matches are strong signals. JS/CSS files score weakly and only when rare: files used by hundreds of other sites (CMS plugins, WordPress core) are dropped, because they would turn every such site into a "lookalike".
 
+## How candidates are matched, scored and classified
+
+The analyst gives the original domain (`gi-de.com`) and, optionally, keywords (`Giesecke`, `Devrient`, `G+D`, `Giesecke+Devrient`). **Every keyword is expanded and searched independently** (CT, URLScan, Bing/DuckDuckGo/Wayback, VirusTotal) and matched against the *whole hostname*, split with the Public Suffix List into subdomain, second-level label, registered domain and TLD. The keyword that triggered each match, and every other keyword that matched, is recorded.
+
+| Technique | Example (brand `gi-de.com`) |
+|---|---|
+| Exact / combo | `gi-de-login.net`, `secure-gi-de.org`, `gi-de.xyz` |
+| **Subdomain impersonation** (brand under someone else's registered domain) | `gi-de.astrobale-core.tech`, `login.gi-de.attacker.com`, `gi.de.attacker.com` (brand split across labels) |
+| Typosquat | transposition `gi-ed`, omission `gieseck`, repetition `gieseecke`, insertion `gieseckex`, keyboard `gieseckw`, substitution `gi-do`, hyphenation `gide` |
+| Homograph / IDN | Cyrillic `gі-dе.com`, `xn--` Punycode, mixed-script, `1`→`l` / `0`→`o` digit tricks |
+| Multi-word | `gieseckedevrient-security.com`, `giesecke.devrient.evil.net` |
+
+**Precision rules.** Short brand stems are one edit from ordinary words, so `wide.com` / `side.com` are *not* typosquats of `gi-de` (a hyphenated stem must keep its hyphen: `gi-do`, `gi-d`). Edit budget is one edit up to 9 characters (`deviant.com` is not `devrient`). Abbreviations of three characters or fewer (`G+D`, `gd`) are recorded but weak: they never reach "Potential" on the name alone. Dictionary collisions (`guided`, `gideon`, `goods`, `gdpr`) are benign unless page or intel evidence says otherwise. The brand's own domains (allowlist, certificate SANs, redirect-to-brand, brand-organisation TLS certificate) are never candidates.
+
+**Brand + malicious context.** A brand match next to a lure word (`login`, `secure`, `verification`, `banking`, `wallet`, `account`, `authentication`, `payment`, ... anywhere in the hostname, including subdomains: `login.gi-de.evil.net`) gets extra priority (`brand_lure_context`) and is listed under *Malicious Context*. A short stem glued to a lure word (`gidewallet.com`, `gidelogin.evil.net`) counts as a combosquat; glued to any other word (`gidewear`, `gideon`) it does not. The list is configurable with `LURE_KEYWORDS` (`.env.example`).
+
+**Legitimate ownership.** Besides the allowlist, a candidate is *Likely brand-owned* (Benign) when the evidence is verifiable: its DNS is served by the brand's own name servers, its mail goes to the brand's own mail servers, its TLS certificate also covers a brand domain (shared CDN / multi-tenant certificates are ignored), its certificate is issued to the brand's organisation, or it redirects to the brand. WHOIS/RDAP registrant names are *not* trusted for this: anyone can type a company name into a registration form.
+
+**Classification.**
+
+| Class | Meaning |
+|---|---|
+| **Confirmed Impersonation** | Score ≥ 70 *and* independent, non-name evidence: identical favicon / matching logo, brand in the title, cloned text, brand resources, shared analytics ID, a phishing-feed listing, a favicon/asset hash match, or ≥ 2 VirusTotal vendors. |
+| **Potential Impersonation** | A strong keyword name match, or suspicious signals, that nothing has disproved. A domain-name match plus registration age and mail servers **alone is capped at 69 and stays Potential**. |
+| **Benign / Unrelated** | Brand-owned, dictionary collisions, weak abbreviations with no other signal, or a live site inspected and found unrelated. |
+
+**Threat score (0-100).** A sum of independent signals, each with its reason and points shown under *Why this score* (`score_breakdown` in the API/JSON/CSV): name match / subdomain position, similarity and technique, mixed-script IDN, registration age, mail servers, CT certificate, page content (favicon, logo pHash, title, text, brand resources, analytics ID, password form), phishing feeds, VirusTotal vendor count, favicon/asset-hash intel. All weights and thresholds are tunable: set `THREAT_SCORE_WEIGHTS` (see `.env.example`); `GET /api/scoring-weights` shows the effective values.
+
+**Optional VirusTotal.** With `VIRUSTOTAL_API_KEY`, besides keyword discovery a hunt checks the reputation of up to 12 of the most suspicious candidates (free tier: 4 requests/minute; it stops cleanly when rate limited). Only vendor *detections* count as evidence; a clean answer adds nothing.
+
+**Bring your own list.** `POST /api/impersonation/evaluate` runs the same matcher, score and classification over a list of hostnames (offline; add `"resolve": true` for DNS):
+
+```bash
+curl -s localhost:8080/api/impersonation/evaluate -H 'content-type: application/json' -d '{
+  "original_domain": "gi-de.com", "keywords": ["Giesecke","Devrient","G+D"],
+  "domains": ["gi-de.astrobale-core.tech", "wide.com", "gi-ed.com"]}'
+```
+
+## Infrastructure Investigator
+
+**Sidebar → Infrastructure** (or **Map infrastructure** on any hunt result). Give it one domain, hostname or URL — a phishing site or your own — and it maps the operation behind it, free sources only:
+
+1. **Fingerprint** every domain: DNS, RDAP/WHOIS (registrant only when published), IP owner, ASN (Team Cymru DNS, RIPEstat fallback), TLS certificate and SANs, and one safe page visit (no JavaScript, nothing submitted) for the phishing-kit "DNA": title, favicon hash, analytics IDs, Telegram exfiltration bots and chat IDs, crypto wallets, contact e-mails, the host forms post stolen data to, download lures, HTML skeleton.
+2. **Pivot** from each fingerprint: certificate SANs, crt.sh and OTX passive DNS (siblings under the same registered domain), same IP (HackerTarget, URLScan), same favicon / exact title (URLScan), uncommon shared name servers (HackerTarget). Each root / IP / name server / favicon / title is searched once; a source that rate-limits is skipped for the rest of the run.
+3. **Link by evidence strength.** Strong: shared certificate, same attacker-owned registered domain, same Telegram bot / chat ID / wallet / data-collection host, identical kit. Medium: small dedicated IP, uncommon name server, same favicon / title / analytics ID (cloned pages carry the brand's own ID). Weak: mass-hosting IPs, provider name servers, registrar, ASN. A domain's confidence is the weakest hop on its strongest chain back to the seed, so an unlucky shared-hosting neighbour is never reported as "the actor".
+4. **Dossier.** What they are doing (credential harvesting, card fraud, crypto drainer, malware, support / investment / job scams — content-based; login or checkout pages only count on domains under a year old or with kit artefacts), who / what they target, who is behind it (public data only), infrastructure habits, tradecraft with MITRE ATT&CK techniques, timeline, and **what they will likely do next**: the next domains their naming pattern predicts, checked live in DNS (registered ones are listed first).
+
+A **legitimate** seed gets an organisation-footprint view instead (estate, no malicious behaviour seen) plus **Sites impersonating this domain**: other registered domains serving its exact title, favicon or layout. Exports: graph PNG, IOC CSV, full JSON (`GET /api/investigate/{id}/iocs.csv` too). API: `POST /api/investigate {target, depth 1-3, max_domains, keywords}`, then poll `GET /api/investigate/{id}`.
+
+**Limits, honestly.** "Who is behind it" stops at public data: most registrations are privacy-protected, and naming a person needs registrar / law-enforcement process. Telegram bot secrets found in kits are masked; report bots to Telegram rather than using them. Free sources rate-limit (HackerTarget allows about 50 lookups a day, OTX throttles anonymous use), so a run reports which sources it had to skip. A typical 15-domain investigation takes 1-3 minutes.
+
+## Interface
+
+A dark ("Obsidian") and light ("Porcelain") theme share one design system (`web/static/css/tokens.css`): indigo-to-cyan brand gradients, glass surfaces, severity colours that stay legible in both themes, and motion that respects `prefers-reduced-motion`. The theme switch is in the top bar (Light / Dark / System, where System follows your OS live; dark is the default).
+
+- **Overview** is the home page: an exposure index (0-100, derived from your saved hunts, with the formula shown), KPI tiles with sparklines and deltas, an exposure trend, threat mix, a per-brand table, live source coverage and an activity timeline. With no history it shows a first-run guide, and **Preview with sample data** shows the dashboard populated (clearly labelled, never stored).
+- **Command palette**: `Ctrl K` (`⌘ K` on Mac) or `/` from anywhere. Jump to any page, switch theme, or type a domain to hunt it, run the daily radar on it, or investigate it.
+- **Notification centre** (bell): watchlist alerts, source issues and running jobs in one place; toasts are typed and dismissible.
+- Responsive down to phone width, with a slide-in navigation drawer.
+- Static assets are always revalidated, so a UI update is never hidden behind a stale cached file.
+
 ## Web UI
 
 Start with `python favicon_hash.py --ui` (or `python app.py --port 8080`). The server binds to localhost; icon previews are embedded, so your browser never contacts suspect hosts.
@@ -44,7 +106,9 @@ Start with `python favicon_hash.py --ui` (or `python app.py --port 8080`). The s
 | Hash aggregator | Merge MMH3 / MD5 / SHA-256 values (or an existing query) into one OR query per platform. |
 | Dork generator | Title, hostname, certificate and page-content dorks for brand names, project names and domains. |
 | History, Watchlist | Reopen past hunts, triage domains, monitor brands on a schedule. |
-| API keys, Storage | Configure sources and choose SQLite or MongoDB. |
+| Scan Scheduler | Batches of monitored domains (each with its own keywords), scanned automatically on a schedule, with per-domain dashboards. See below. |
+| Data Management | Per-domain / per-batch volumes, scoped deletions with typed confirmation, and the audit log. |
+| API keys, Storage | Configure sources; MongoDB connection and legacy SQLite import. |
 
 ## Configuration
 
@@ -59,22 +123,49 @@ Copy `.env.example` to `.env` or use the page; changes apply without a restart. 
 | FOFA | `FOFA_KEY` (+ `FOFA_EMAIL` for older accounts) | Skipped |
 | Censys Platform | `CENSYS_PAT` (+ `CENSYS_ORG_ID`) | Skipped |
 | Google Lens (SerpApi) | `SERPAPI_KEY` | Skipped (manual reverse-image links are still shown) |
+| VirusTotal | `VIRUSTOTAL_API_KEY` | Skipped (free key is enough; see "Optional VirusTotal") |
+| Bing RSS, DuckDuckGo, Wayback | none | Always on (DuckDuckGo's anti-bot challenge is detected and skipped, never bypassed) |
+| Google Safe Browsing | `GOOGLE_SAFE_BROWSING_KEY` | Skipped. One batched check of every candidate; a listing scores +45 and counts as corroboration. Google limits the Lookup API to non-commercial use (commercial: Google Web Risk). |
+| AlienVault OTX passive DNS | `OTX_API_KEY` (optional) | Works anonymously. For the most suspicious registered domains, finds sibling brand hostnames CT never saw. |
+
+**Free mode (default).** Only free sources are used: paid platforms (Shodan, FOFA, Censys, SerpApi / Google Lens, WhoisXML) are never called, even when a key is saved, and every URLScan query is rewritten to the form its free plan accepts (no leading wildcards or `.keyword` substring fields). Free-tier keys (URLScan, VirusTotal, Google Safe Browsing, OTX) are still used when present. `FREE_ONLY_MODE=0` in `.env` turns paid platforms back on.
+
+**Source activity.** Skipped searches, quota limits, anti-bot challenges and outages are never shown on the results screens. They are logged on **API keys → Source activity** (per source: what happened, where, when, how often, and what to do) and via `GET /api/sources/events`.
+
+**Source availability.** *API keys → Check availability* (or `GET /api/sources/health`) probes every free source once (about `example.com`, cached 5 minutes) and reports up / challenged / rate-limited / degraded / down. Keyed sources are not called there (that would spend quota); their own *Test* button checks the key.
 | crt.sh, DNS, RDAP, feeds | none | Always on |
 
 **Several keys per source.** Keys are comma-separated (`SHODAN_API_KEY=key1,key2`) and tried in order. A key that hits a rate limit pauses for the platform's `Retry-After` time (default 60 s), one out of credits for 12 h, one whose plan doesn't allow the query for 30 min, and an invalid key until replaced; the next key takes over automatically. The page shows each key's state, countdown and call count, with Test all, Make primary, Remove and Reset paused keys. The **Test** button uses free account endpoints (Censys has none, so it runs one 1-result search).
 
 crt.sh is often overloaded; when it fails the hunt continues and says so. Each failed or skipped source is listed in the results.
 
-### Storage: SQLite or MongoDB
+### Storage: MongoDB
 
-SQLite (`data/hunter.db`, override with `BRAND_HUNTER_DB`) is the default. For MongoDB, open **Settings → Storage**, paste a connection string and click *Save and switch* (or set `MONGODB_URI` and optionally `MONGODB_DB` in `.env`). The connection is tested first and a broken string is never saved; storage switches immediately.
+MongoDB is the only database. With no configuration the app uses the local server `mongodb://127.0.0.1:27017` and the database `brand_hunter`. To use another server open **Settings → Storage**, paste a connection string and click *Save* (or set `MONGODB_URI` and optionally `MONGODB_DB` in `.env`). The connection is tested first and a broken string is never saved.
 
 - **Strings:** `mongodb://127.0.0.1:27017`, replica sets, and Atlas (`mongodb+srv://user:password@cluster0.xxxxx.mongodb.net/`). Percent-encode special characters in the password. The database defaults to the one in the URI, otherwise `brand_hunter`.
 - **Credentials** stay in `.env`; the UI shows hosts and database only, and every error message is redacted.
-- **Layout:** `hunts`, `candidates` (one document per lookalike per hunt, queryable: `db.candidates.find({target: "paypal.com", verdict: "phishing"}).sort({score: -1})`, and never near the 16 MB document limit), `triage`, `watchlist`, `alerts`, `counters`.
-- **Copy data:** switching doesn't move old records. Use *Copy local SQLite to MongoDB* (or `python favicon_hash.py --migrate-history`); it is safe to repeat. Webhook URLs are copied too, so protect the database like any credential store.
-- **Several app instances** can share one MongoDB: each due watchlist hunt is claimed atomically, so exactly one runs it.
-- **If MongoDB is unreachable,** hunts still complete (with a note that they weren't saved) and History / Watchlist / triage report "not reachable". The app never silently falls back to SQLite.
+- **Collections:** `hunts`, `candidates`, `triage`, `watchlist`, `alerts`, `counters` (hunts and cases) and `organizations`, `monitored_domains`, `scan_batches`, `batch_domain_memberships`, `batch_executions`, `scan_jobs`, `impersonation_findings`, `scan_observations`, `scheduler_locks`, `application_settings`, `audit_logs`, `migrations` (Scan Scheduler). Schema, indexes and query plans: [docs/SCHEDULER.md](docs/SCHEDULER.md).
+- **Legacy SQLite history** (`data/hunter.db` from older versions, or `BRAND_HUNTER_DB`): *Settings → Storage → Import legacy SQLite file* or `python favicon_hash.py --migrate-history`. The import makes a verified backup copy in `data/backups/` first, opens the file read-only, copies every record idempotently (safe to repeat), validates the counts and records the run in `migrations`. The SQLite file and the backup are never deleted: remove them yourself once you have checked the data.
+- **Several app instances** can share one MongoDB: due watchlist hunts and scheduled batch runs are claimed atomically, so exactly one instance runs each.
+- **If MongoDB is unreachable,** hunts still complete (with a note that they weren't saved), the API answers 503 "not reachable", and the scheduler retries on its next tick. The app never falls back to another database.
+
+### Scan Scheduler
+
+Batches of monitored domains that the **server** scans automatically (no browser needs to be open):
+
+- **Batches:** name, description, organization, schedule (daily at a time, weekly on chosen days, every N hours, or manual only) in any IANA time zone, scan depth, missed-run policy (*run once when back* or *skip*), notifications (in-app, webhook; on new findings and/or failures). Create, edit, pause/resume, enable/disable, duplicate (copies start paused), run now, cancel, retry failed domains, execution history.
+- **Domains:** paste or upload TXT / CSV / Excel (max 2 MB). URLs become hostnames, `www.` and IDNs are normalised, duplicates are merged (their keywords too), and invalid lines are shown with the reason so you can correct or remove them. Nothing is dropped silently. Each domain keeps its own keywords and allowlist.
+- **Isolation:** each domain is scanned on its own with only its keywords. Every finding belongs to exactly one monitored domain (`impersonation_findings` is unique on domain + host), so the same hostname found for two brands is two separate findings. All filtering, paging and exports happen server-side.
+- **Lifecycle** (separate from the Confirmed / Potential / Benign classification): *New*, *Previously Discovered*, *Updated* (evidence changed), *Reappeared*, *Currently Unreachable* (only when its own DNS says NXDOMAIN: a source outage never marks a host gone), plus an analyst *Under review* flag. First seen is kept, last seen is updated, and every scan records an observation per finding.
+- **Engine:** leases in MongoDB (restart-safe, multi-instance safe, one run per batch and one scan per domain at a time), configurable parallelism, per-domain timeout, retries with exponential back-off (longer after rate limits), graceful shutdown that resumes on the next start. Settings: *Scan Scheduler → Engine settings* (`SCHEDULER_CONCURRENCY`, `SCHEDULER_JOB_TIMEOUT` set defaults; `BRAND_HUNTER_SCHEDULER=0` turns background scheduling off).
+
+### Security
+
+- Settings, storage and every destructive Data Management call answer only requests from this machine, and all write endpoints reject cross-site requests.
+- Deletions need the exact domain or batch name typed back, are scoped by validated ids, refuse while a scan of the target runs, and are written to `audit_logs`.
+- Page inspection never connects to loopback, private, link-local or cloud-metadata addresses, including through redirects (`BRAND_HUNTER_ALLOW_PRIVATE_FETCH=1` allows it for intentional internal scans).
+- Write endpoints are rate limited per client (`BRAND_HUNTER_RATE_LIMIT`, default 120/min, stricter for deletions), bodies are capped (`BRAND_HUNTER_MAX_BODY_MB`, default 25), responses carry `nosniff` / `DENY` framing / `no-referrer` headers, and CSV exports neutralise spreadsheet formulas.
 
 ## Phishing feeds
 
@@ -122,7 +213,7 @@ python favicon_hash.py -d gi-de.com                                      # asset
 python favicon_hash.py -d gi-de.com -o gi_de.json -c gi_de.csv --save-icons ./downloaded_icons
 python favicon_hash.py -f sample_targets.txt -o batch.json -c batch.csv  # batch scan
 python favicon_hash.py -d gi-de.com --launch                             # open master queries on all 4 platforms
-python favicon_hash.py --migrate-history                                 # copy SQLite history into MongoDB
+python favicon_hash.py --migrate-history                                 # import a legacy SQLite history into MongoDB (backup + validation)
 ```
 
 Hunt options: `--depth quick|standard|deep`, `--no-ct`, `--no-feeds`, `--no-intel`, `--no-verify` (DNS only), `--no-rdap`, `--no-save` (skip history), `--allow other-brand-domain.com,...`, `--keywords ports,green,...` (extra combosquat words). Scan options: `--no-logos`, `--no-subdomains`, `--save-icons DIR`, `--timeout N`, `-q`.
@@ -138,12 +229,14 @@ for icon in result["icons"]:
 print(result["queries"]["combined"])    # {"fofa": ..., "shodan": ..., "censys": ..., "urlscan": ...}
 ```
 
-`POST /api/hunt` returns a `job_id`; poll `GET /api/hunt/{job_id}` for progress and the result, `DELETE` it to cancel. Past hunts: `GET /api/hunts` and `GET /api/hunts/{id}`. Everything else (triage, takedown, IOC export, watchlist, alerts, settings, storage) is documented at `/docs`.
+`POST /api/hunt` returns a `job_id`; poll `GET /api/hunt/{job_id}` for progress and the result, `DELETE` it to cancel. Past hunts: `GET /api/hunts` and `GET /api/hunts/{id}`. Everything else (triage, takedown, IOC export, watchlist, alerts, settings, storage, `/api/scheduler/*`, `/api/data/*`) is documented at `/docs`.
 
 ## Layout
 
 ```
-app.py                  FastAPI server and API
+app.py                  FastAPI app wiring (routes in api/routes, background services in api/services)
+api/services/batch_scheduler.py   Scan Scheduler engine (claims, executor, retries, recovery)
+api/security.py         rate limiting, body limit, security headers
 favicon_hash.py         CLI entry point and scan_domain() library wrapper
 core/
   hunter.py             hunt pipeline (fingerprint, generate, CT, feeds, intel, DNS, inspect, RDAP, score)
@@ -154,10 +247,21 @@ core/
   pivots.py             analytics / rare-file pivots, search-engine dorks, automatic intel plan
   verifier.py           live-site inspection and explainable scoring
   takedown.py, alerts.py   abuse contacts, e-mail and evidence report, blocklist / STIX; alert rules and webhooks
-  store.py, mongostore.py, mongouri.py, migrate.py   case store (SQLite / MongoDB) and data copy
+  store.py, mongostore.py, mongouri.py   MongoDB case store (hunts, triage, watchlist, alerts)
+  migrate.py            one-way legacy SQLite import (backup, idempotent copy, validation)
+  scheduler_store.py    Scan Scheduler data layer: batches, domains, executions, jobs, findings lifecycle, scoped deletes
+  schedule.py, domain_input.py   schedules / next run (time zones, DST); bulk domain import (TXT / CSV / XLSX)
+  netguard.py           SSRF guard for page inspection
   config.py             keys and settings from .env / environment
+  domain_matcher.py     hostname matching (subdomain / typosquat / homograph / multi-keyword) and classification
+  scoring.py            tunable threat-score weights and thresholds (THREAT_SCORE_WEIGHTS)
+  bulk.py               offline bulk evaluation of a hostname list (POST /api/impersonation/evaluate)
+  health.py             free-source availability probes (GET /api/sources/health)
+  infra.py              Infrastructure Investigator: fingerprint, pivot, evidence-weighted linking, operator dossier, predictions
+  dorks.py, daily_intel.py   keyword dorks and the daily threat radar
   crawler.py, hasher.py, matcher.py, query_gen.py, platforms.py, impersonation.py, domains.py, exporter.py
-web/static/             dashboard (index.html, app.js, style.css)
+web/static/             dashboard: index.html, css/ (tokens, shell, components, overview, infra, scheduler), js/ (shell = theme, palette, notifications, overview; scheduler, datamgmt)
+docs/SCHEDULER.md       scheduler architecture, collections and indexes, isolation, deletion, measurements
 tests/                  pytest suite (offline)
 ```
 
@@ -165,12 +269,12 @@ tests/                  pytest suite (offline)
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q tests                  # offline, no network needed
+python -m pytest -q tests                  # offline, no network needed (in-memory MongoDB via mongomock)
 python -m ruff check app.py favicon_hash.py core tests
 ```
 
-To also run the contract tests against a real MongoDB (a throwaway database is created and dropped):
+To also run the storage and scheduler suites against a real MongoDB (throwaway `bih_test_*` databases are created and dropped):
 
 ```bash
-BRAND_HUNTER_TEST_MONGO_URI=mongodb://127.0.0.1:27017 python -m pytest -q tests/test_mongo.py
+BRAND_HUNTER_TEST_MONGO_URI=mongodb://127.0.0.1:27017 python -m pytest -q tests/test_mongo.py tests/test_scheduler.py
 ```

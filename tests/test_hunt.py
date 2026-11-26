@@ -161,7 +161,7 @@ class FakeSite:
     def __init__(self, pages):
         self.pages = pages
 
-    def __call__(self, crawler, url, max_bytes, timeout):
+    def __call__(self, crawler, url, max_bytes, timeout, deadline=None):
         if url not in self.pages:
             return None
         status, final, ctype, body = self.pages[url]
@@ -301,7 +301,8 @@ class TestHuntPipeline(unittest.TestCase):
         adanl_feed = next(c for c in result["candidates"] if c["domain"] == "adanl.com")
         self.assertIn("phishingdb", adanl_feed["sources"])
         self.assertTrue(any("Phishing.Database" in r for r in adanl_feed["reasons"]))
-        self.assertIn("using the cached copy", " ".join(result["errors"]))
+        self.assertIn("using the cached copy", " ".join(result["source_issues"]))  # logged for Settings, not shown on results
+        self.assertEqual(result["errors"], [])
         self.assertEqual(result["feeds"][0]["name"], "OpenPhish")
         offline = next(c for c in result["candidates"] if c["domain"] == "adani-verify.top")
         self.assertEqual(offline["verdict"], "offline")
@@ -335,7 +336,6 @@ class TestHuntOverlap(unittest.TestCase):
     """The hunt must wait for the slowest network phase, not the sum of them."""
 
     def run_hunt(self, **patches):
-        import threading
         scan = {"domain": "adani.com", "resolved_url": "https://www.adani.com/", "reachable": True,
                 "icons": [{"kind": "favicon", "is_primary": True, **analyze_icon_bytes(BRAND_ICON), "url": "https://www.adani.com/favicon.ico", "_raw_bytes": BRAND_ICON}]}
         defaults = {

@@ -1,5 +1,5 @@
 """
-MongoDB backend for the case store (same interface as core.store.Store).
+MongoDB case store (the application's only persistent database).
 
 Collections (database "brand_hunter" unless the URI or MONGODB_DB says otherwise):
 
@@ -114,6 +114,11 @@ class MongoStore(StoreBase):
 
     def close(self) -> None:
         self._client.close()
+
+    @property
+    def db(self):
+        """The pymongo Database (used by the scheduler / data-management layer on the same connection)."""
+        return self._db
 
     def _next_id(self, name: str) -> int:
         doc = self._db.counters.find_one_and_update({"_id": name}, {"$inc": {"seq": 1}}, upsert=True, return_document=ReturnDocument.AFTER)

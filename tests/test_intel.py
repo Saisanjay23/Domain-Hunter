@@ -23,6 +23,7 @@ class FakeResp:
 
 
 class TestConfig(unittest.TestCase):
+    @mock.patch.dict(os.environ, {"FREE_ONLY_MODE": "0"})  # exercises the paid-platform path
     def test_env_file_and_status_never_exposes_values(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, ".env")
@@ -190,6 +191,8 @@ class TestPivots(unittest.TestCase):
         imp = [d for d in dorks if d["group"] == "Impersonation pages"]
         self.assertTrue(all("-site:adani.com" in d["query"] for d in imp))
 
+    @mock.patch.dict(os.environ, {"FREE_ONLY_MODE": "0"})  # exercises the paid-platform path
+
     def test_intel_plan(self):
         icons = [{"kind": "favicon", "sha256": "a" * 64}, {"kind": "logo", "sha256": "b" * 64}, {"kind": "subdomain", "sha256": "c" * 64}]
         plan = pivots.build_intel_plan(
@@ -264,6 +267,8 @@ class TestIntelRunAndScore(unittest.TestCase):
     def setUp(self):
         from core.keypool import POOL
         POOL.reset()
+
+    @mock.patch.dict(os.environ, {"FREE_ONLY_MODE": "0"})  # exercises the paid-platform path
 
     def test_run_intel_skips_unconfigured_and_reports_errors(self):
         plan = [{"source": "urlscan", "match": "dork", "label": "L", "query": "q1"},

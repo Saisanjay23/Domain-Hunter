@@ -172,7 +172,7 @@ Examples:
     group.add_argument(
         "--migrate-history",
         action="store_true",
-        help="Copy the local SQLite history, case notes, watchlist and alerts into MongoDB (MONGODB_URI must be set)",
+        help="Import a legacy SQLite history file (data/hunter.db or BRAND_HUNTER_DB) into MongoDB: backup, copy, validate. The file is kept.",
     )
     group.add_argument(
         "--ui",
@@ -245,29 +245,30 @@ Examples:
         return
 
     if args.migrate_history:
-        from core.migrate import copy_store
-        from core.store import Store, StoreUnavailable, default_path, get_store
+        from core.migrate import legacy_candidates, migrate_sqlite
+        from core.store import StoreUnavailable, get_store
 
         try:
             active = get_store()
         except StoreUnavailable as e:
             print(f"[-] {e}", file=sys.stderr)
             sys.exit(1)
-        if active.backend != "mongodb":
-            print("[-] MongoDB is not configured. Set MONGODB_URI in .env (or Settings > Storage) first.", file=sys.stderr)
+        files = legacy_candidates()
+        if not files:
+            print("[-] No legacy SQLite history found (data/hunter.db or BRAND_HUNTER_DB).", file=sys.stderr)
             sys.exit(1)
-        if not os.path.exists(default_path()):
-            print(f"[-] No local SQLite history at {default_path()}", file=sys.stderr)
-            sys.exit(1)
-        local = Store(default_path())
-        try:
-            counts = copy_store(local, active)
-        finally:
-            local.close()
-        print(f"[+] Copied {counts['hunts']} hunt(s), {counts['triage']} case note(s), {counts['watchlist']} watched brand(s)"
-              f" ({counts['watchlist_skipped']} already present), alerts: "
-              f"{'skipped (destination already has alerts)' if counts['alerts_skipped'] else counts['alerts']}.")
-        return
+        failed = False
+        for path in files:
+            rep = migrate_sqlite(path, active)
+            c, v = rep["copied"], rep["validation"]
+            print(f"[+] {path}")
+            print(f"    backup: {rep['backup']['path']}")
+            print(f"    copied {c['hunts']} hunt(s), {c['triage']} case note(s), {c['watchlist']} watched brand(s) "
+                  f"({c['watchlist_skipped']} already present), {c['alerts']} alert(s) ({c['alerts_skipped']} already present)")
+            print(f"    validation: {'OK' if v['ok'] else 'MISMATCH ' + str(v)}")
+            failed = failed or not v["ok"]
+        print("[i] The SQLite file and its backup were left in place. Delete them yourself once you have checked the data.")
+        sys.exit(1 if failed else 0)
 
     if args.hunt:
         run_hunt_cli(args)

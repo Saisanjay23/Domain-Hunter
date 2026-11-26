@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest import mock
 from core import impersonation
@@ -253,6 +254,8 @@ class TestImpersonation(unittest.TestCase):
 
         for k in ("inurl", "credential_lure", "wildcard_site", "free_hosting", "scam_campaigns", "social_and_apps", "leaks_and_redirects"):
             self.assertIn(k, var_res["search_engines"])
+
+    @mock.patch.dict(os.environ, {"FREE_ONLY_MODE": "0"})  # exercises the paid-platform path
 
     def test_capture_domains_from_keywords(self):
         fake_ct = {

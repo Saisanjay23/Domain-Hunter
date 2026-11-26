@@ -280,13 +280,65 @@ def generate_permutations(
 
     # Combosquatting: brand + keyword on the original suffix and .com
     words = COMBO_WORDS[:COMBO_COUNT[depth]]
-    words = list(dict.fromkeys(words + [w.lower() for w in (extra_keywords or []) if w and w.strip()]))
+    clean_extras: List[str] = []
+    for raw_kw in extra_keywords or []:
+        kw = (raw_kw or "").strip().lower()
+        if not kw:
+            continue
+        if "+" in kw or "&" in kw:
+            parts = [re.sub(r"[^a-z0-9-]", "", p) for p in re.split(r"[+&/\s]+", kw) if p.strip()]
+            joined = "".join(parts)
+            hyph = "-".join(p for p in parts if p)
+            if len(hyph) >= 2:
+                clean_extras.append(hyph)
+            if len(joined) >= 2 and joined != hyph:
+                clean_extras.append(joined)
+            for p in parts:
+                if len(p) >= 4:
+                    clean_extras.append(p)
+        else:
+            norm = re.sub(r"[^a-z0-9-]+", "-", kw).strip("-")
+            if norm:
+                clean_extras.append(norm)
+                if "-" in norm:
+                    clean_extras.append(norm.replace("-", ""))
+
+    words = list(dict.fromkeys(words + [w for w in clean_extras if 2 <= len(w) <= 24]))
     combo_tlds = [suffix] + [t for t in ("com",) if t != suffix]
     if depth == "deep":
         combo_tlds += [t for t in ("net", "online", "xyz") if t not in combo_tlds]
     for cand in combosquatting(label, words):
         for t in combo_tlds:
             add(cand, "combosquat", t)
+
+    # Independent keyword typosquats + brand-keyword combos (for multi-keyword analyst inputs)
+    for kw_label in clean_extras[:6]:
+        if kw_label == label or len(kw_label.replace("-", "")) < 4:
+            # Short <=3 char abbreviations (like G+D -> 'gd') get targeted lure combos only
+            if 2 <= len(kw_label.replace("-", "")) <= 3:
+                for lure in ("login", "secure", "security", "portal", "verify"):
+                    add(f"{kw_label}-{lure}", "combosquat", suffix)
+                    if "com" != suffix:
+                        add(f"{kw_label}-{lure}", "combosquat", "com")
+            continue
+        for t in (suffix, "com", "net", "org"):
+            add(kw_label, "keyword-exact", t)
+        for cand in combosquatting(kw_label, COMBO_WORDS[:6]):
+            add(cand, "combosquat", suffix)
+            if "com" != suffix:
+                add(cand, "combosquat", "com")
+        for fname, kgen in (
+            ("omission", omission(kw_label)),
+            ("repetition", repetition(kw_label)),
+            ("transposition", transposition(kw_label)),
+            ("replacement", replacement(kw_label)),
+            ("homoglyph", homoglyph_ascii(kw_label)),
+            ("hyphenation", hyphenation(kw_label)),
+        ):
+            for cand in kgen:
+                add(cand, fname, suffix)
+                if depth != "quick" and "com" != suffix:
+                    add(cand, fname, "com")
 
     # TLD swap of the untouched label
     for t in TLDS[depth]:
