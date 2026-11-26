@@ -316,3 +316,94 @@ def test_end_to_end_hunt_with_keywords_subdomains_dedup_and_nxdomain():
     assert sub_csv["registered_domain"] == "astrobale-core.tech"
     assert sub_csv["matching_subdomain"] == "gi-de"
     assert sub_csv["classification"] == "Confirmed Impersonation"
+
+
+def test_bing_rss_client_side_operator_enforcement_and_redirect_unwrap(monkeypatch):
+    import base64
+
+    monkeypatch.setattr(sources, "_FREE_CACHE", {})
+    wrapped_target = "a1" + base64.urlsafe_b64encode(b"https://paypal-verify.workers.dev/signin").decode().rstrip("=")
+    rss_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+    <rss version="2.0"><channel>
+      <item><title>PayPal Official</title><link>https://www.paypal.com/myaccount</link></item>
+      <item><title>PayPal Sandbox</title><link>https://www-v2.sandbox.paypal.com/wf/signin</link></item>
+      <item><title>PayPal - Wikipedia</title><link>https://en.wikipedia.org/wiki/PayPal</link></item>
+      <item><title>PayPal Sign In Clone</title><link>https://www.bing.com/ck/a?!&amp;&amp;u={wrapped_target}</link></item>
+    </channel></rss>"""
+    q = '"paypal" (site:workers.dev OR site:vercel.app) -site:paypal.com'
+    with mock.patch("requests.get", return_value=_FakeResp(200, text=rss_xml)):
+        hits = sources.bing_search(q)
+    assert [h["host"] for h in hits] == ["paypal-verify.workers.dev"]
+    assert hits[0]["url"] == "https://paypal-verify.workers.dev/signin"
+
+    monkeypatch.setattr(sources, "_FREE_CACHE", {})
+    with mock.patch("requests.get", return_value=_FakeResp(200, text=rss_xml)):
+        hits_title = sources.bing_search('intitle:"PayPal" -site:paypal.com')
+    hosts_title = [h["host"] for h in hits_title]
+    assert "www.paypal.com" not in hosts_title
+    assert "www-v2.sandbox.paypal.com" not in hosts_title
+    assert "paypal-verify.workers.dev" in hosts_title
+
+
+def test_hunt_filters_out_bing_false_positives_and_keeps_real_hits():
+    scan = {"domain": "gi-de.com", "resolved_url": "https://www.gi-de.com/", "reachable": True, "icons": []}
+    brand = {
+        "domain": "gi-de.com", "title": "Giesecke+Devrient | SecurityTech",
+        "tokens": ["gi-de", "giesecke", "devrient", "gieseckedevrient"],
+        "raw_keywords": GI_DE_KEYWORDS,
+        "allowlist": ["gi-de.com", "giesecke-devrient.com"],
+        "favicon_mmh3": set(), "favicon_sha256": set(), "any_sha256": set(),
+        "phashes": [], "analytics": set(), "words": {"giesecke", "devrient"}, "cert_org": "Giesecke+Devrient",
+    }
+    bing_hits = [
+        # Real impersonations that MUST survive
+        {"host": "gi-de.astrobale-core.tech", "ip": None, "port": None, "url": "https://gi-de.astrobale-core.tech/login",
+         "title": "Giesecke+Devrient Login", "time": "", "source": "bing", "match": "dork", "label": "bing"},
+        {"host": "giesecke-portal.workers.dev", "ip": None, "port": None, "url": "https://giesecke-portal.workers.dev/",
+         "title": "Sign In", "time": "", "source": "bing", "match": "dork", "label": "bing"},
+        {"host": "portal-9124.vercel.app", "ip": None, "port": None, "url": "https://portal-9124.vercel.app/giesecke-login",
+         "title": "Customer Portal", "time": "", "source": "bing", "match": "dork", "label": "bing"},
+        # False positives observed from live Bing RSS that MUST be suppressed
+        {"host": "en.wikipedia.org", "ip": None, "port": None, "url": "https://en.wikipedia.org/wiki/Giesecke%2BDevrient",
+         "title": "Giesecke+Devrient - Wikipedia", "time": "", "source": "bing", "match": "dork", "label": "bing"},
+        {"host": "www.scam-detector.com", "ip": None, "port": None, "url": "https://www.scam-detector.com/validator/gi-de-com-review/",
+         "title": "gi-de.com Reviews", "time": "", "source": "bing", "match": "dork", "label": "bing"},
+        {"host": "www.whois.com", "ip": None, "port": None, "url": "https://www.whois.com/whois/gi-de.com",
+         "title": "Whois gi-de.com", "time": "", "source": "bing", "match": "dork", "label": "bing"},
+        {"host": "www.zhihu.com", "ip": None, "port": None, "url": "https://www.zhihu.com/question/27164322",
+         "title": "Unrelated Zhihu thread", "time": "", "source": "bing", "match": "dork", "label": "bing"},
+        {"host": "ssc.gov.in", "ip": None, "port": None, "url": "https://ssc.gov.in/",
+         "title": "Staff Selection Commission", "time": "", "source": "bing", "match": "dork", "label": "bing"},
+        {"host": "vajiramandravi.com", "ip": None, "port": None, "url": "https://vajiramandravi.com/upsc-exam/gi-tag/",
+         "title": "GI Tag List", "time": "", "source": "bing", "match": "dork", "label": "bing"},
+        {"host": "unrelated-demo.vercel.app", "ip": None, "port": None, "url": "https://unrelated-demo.vercel.app/hello",
+         "title": "My React Starter", "time": "", "source": "bing", "match": "dork", "label": "bing"},
+    ]
+    seen_dns_hosts: list = []
+
+    def fake_dns(hosts, **_kw):
+        seen_dns_hosts.extend(hosts)
+        return {
+            h: {"domain": h, "a": ["203.0.113.9"], "aaaa": [], "mx": [], "ns": [], "status": "resolves", "registered": True}
+            for h in hosts
+        }
+
+    with mock.patch.object(hunter.FaviconCrawler, "scan", return_value=scan), \
+            mock.patch.object(hunter.feeds, "match", return_value={"hits": [], "status": [], "errors": []}), \
+            mock.patch.object(hunter, "run_intel", return_value={"status": [], "hits": bing_hits}), \
+            mock.patch.object(hunter, "extract_asset_pivots", return_value={"analytics": [], "assets": []}), \
+            mock.patch.object(hunter, "brand_allowlist", return_value=["gi-de.com", "giesecke-devrient.com"]), \
+            mock.patch.object(hunter, "build_brand_profile", return_value=brand), \
+            mock.patch.object(hunter, "crtsh_search", return_value={"hosts": {}, "error": None}), \
+            mock.patch.object(hunter, "resolve_domains", side_effect=fake_dns), \
+            mock.patch.object(hunter, "verify_candidate", return_value={"http": {"status": 200}, "title": "Portal"}), \
+            mock.patch.object(hunter, "rdap_lookup", return_value={"age_days": 5, "created": "2026-11-21"}):
+        result = hunter.run_hunt("gi-de.com", depth="quick", extra_keywords=GI_DE_KEYWORDS)
+
+    doms = {c["domain"] for c in result["candidates"]}
+    assert {"gi-de.astrobale-core.tech", "giesecke-portal.workers.dev", "portal-9124.vercel.app"} <= doms
+    for fp in ("en.wikipedia.org", "wikipedia.org", "www.scam-detector.com", "scam-detector.com",
+               "www.whois.com", "whois.com", "www.zhihu.com", "zhihu.com",
+               "ssc.gov.in", "vajiramandravi.com", "unrelated-demo.vercel.app"):
+        assert fp not in doms
+        assert fp not in seen_dns_hosts

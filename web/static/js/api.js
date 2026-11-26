@@ -204,6 +204,41 @@ function openDomainBtn(domain, rawUrl = "", cls = "btn btn-xs btn-open-domain") 
   return `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer" class="${cls}" title="Open untrusted domain in a new tab (noopener, noreferrer)" onclick="event.stopPropagation()">Open Domain ↗</a>`;
 }
 
+function candidateUrl(item) {
+  if (!item) return "";
+  if (typeof item === "string") return safeExternalDomainUrl(item);
+  const evUrl = item.evidence?.http?.final_url;
+  if (evUrl && /^https?:\/\//i.test(evUrl)) return evUrl;
+  if (item.url && /^https?:\/\//i.test(item.url)) return item.url;
+  const intelUrl = (item.intel || []).find(i => i?.url && /^https?:\/\//i.test(i.url))?.url;
+  if (intelUrl) return intelUrl;
+  return safeExternalDomainUrl(item.domain || item.host || "");
+}
+
+function collectDomainUrls(items, resolver = candidateUrl) {
+  return [...new Set((items || []).map(resolver).filter(Boolean))];
+}
+
+function copyDomainUrls(items, label = "tab results", resolver = candidateUrl) {
+  const urls = collectDomainUrls(items, resolver);
+  if (!urls.length) {
+    showToast(label ? `No domain URLs in ${label}` : "No domain URLs to copy");
+    return 0;
+  }
+  copyText(urls.join("\n"), `Copied ${plural(urls.length, "domain URL")} (${label})`);
+  return urls.length;
+}
+
+function syncCopyUrlButtons(ids, items, resolver = candidateUrl) {
+  const count = collectDomainUrls(items, resolver).length;
+  (ids || []).forEach(id => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.innerText = count ? `Copy URLs (${count.toLocaleString()})` : "Copy URLs";
+    btn.disabled = !count;
+  });
+}
+
 function detectKeywordLocation(item, origApex) {
   const dom = String(item?.domain || "").toLowerCase();
   const root = String(item?.registered_domain || item?.apex_domain || apexFromDomain(dom)).toLowerCase();

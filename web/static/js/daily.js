@@ -85,6 +85,38 @@ function dailySeverityScore(item) {
   return Math.min(100, s);
 }
 
+function dailyItemMatchesFilter(item, key) {
+  const plats = item.platforms || [];
+  const mts = item.match_types || [];
+  if (key === "all" || !key) return true;
+  if (key === "multi") return plats.length >= 2;
+  if (key === "urlscan") return plats.includes("urlscan");
+  if (key === "crt.sh") return plats.includes("crt.sh");
+  if (key === "nrd_free") return plats.includes("nrd_free");
+  if (key === "feeds") return plats.some(p => ["nrd_free", "openphish", "phishingdb"].includes(p));
+  if (key === "openphish") return plats.includes("openphish");
+  if (key === "phishingdb") return plats.includes("phishingdb");
+  if (key === "permutation") return plats.includes("permutation");
+  if (key === "daily_domain") return mts.includes("daily_domain");
+  if (key === "daily_title") return mts.includes("daily_title");
+  return true;
+}
+
+function copyDailyPlatformUrls(key, label) {
+  const items = (currentDailyResult?.results || []).filter(item => dailyItemMatchesFilter(item, key));
+  copyDomainUrls(items, label || key);
+}
+
+function copyDailyUrls() {
+  if (!currentDailyResult) return showToast("Run Daily Radar first");
+  const rows = filteredDailyItems(currentDailyResult);
+  const clsSel = document.getElementById("daily-class-filter")?.value || "all";
+  const parts = [];
+  if (dailyFilter !== "all") parts.push(SOURCE_LABELS[dailyFilter] || dailyFilter);
+  if (clsSel !== "all") parts.push(clsSel);
+  copyDomainUrls(rows, parts.length ? parts.join(" · ") : "Daily Radar");
+}
+
 function filteredDailyItems(data) {
   const list = data?.results || [];
   const q = (document.getElementById("daily-search-filter")?.value || "").trim().toLowerCase();
@@ -94,17 +126,7 @@ function filteredDailyItems(data) {
 
   const filtered = list.filter(item => {
     const plats = item.platforms || [];
-    const mts = item.match_types || [];
-    if (dailyFilter === "multi" && plats.length < 2) return false;
-    if (dailyFilter === "urlscan" && !plats.includes("urlscan")) return false;
-    if (dailyFilter === "crt.sh" && !plats.includes("crt.sh")) return false;
-    if (dailyFilter === "nrd_free" && !plats.includes("nrd_free")) return false;
-    if (dailyFilter === "feeds" && !plats.some(p => ["nrd_free", "openphish", "phishingdb"].includes(p))) return false;
-    if (dailyFilter === "openphish" && !plats.includes("openphish")) return false;
-    if (dailyFilter === "phishingdb" && !plats.includes("phishingdb")) return false;
-    if (dailyFilter === "permutation" && !plats.includes("permutation")) return false;
-    if (dailyFilter === "daily_domain" && !mts.includes("daily_domain")) return false;
-    if (dailyFilter === "daily_title" && !mts.includes("daily_title")) return false;
+    if (!dailyItemMatchesFilter(item, dailyFilter)) return false;
     if (clsFilter !== "all" && (item.classification || "Potential Impersonation") !== clsFilter) return false;
     if (techFilter !== "all" && (item.matching_technique || "") !== techFilter) return false;
     if (!q) return true;
@@ -139,14 +161,17 @@ function renderDailyResults(data, { scroll = true } = {}) {
     { key: "permutation", name: "Live DNS", count: st.dns_hits || 0, desc: "Active typosquat & combo sites", col: "#1d4ed8" },
   ];
   document.getElementById("daily-platform-cards").innerHTML = platCards.map(c => `
-    <button type="button" class="plat-card${dailyFilter === c.key ? " active" : ""}" style="--plat-color:${c.col}" onclick="setDailyFilter('${c.key}')">
+    <div role="button" tabindex="0" class="plat-card${dailyFilter === c.key ? " active" : ""}" style="--plat-color:${c.col}" onclick="setDailyFilter('${c.key}')" onkeydown="if(event.target===this&&(event.key==='Enter'||event.key===' ')){event.preventDefault();setDailyFilter('${c.key}')}" title="Click to filter findings from ${esc(c.name)}">
       <div class="plat-head">
         <span class="plat-name">${esc(c.name)}</span>
-        ${dailyFilter === c.key ? `<span class="badge badge-sm badge-accent">Active</span>` : ""}
+        <span class="row" style="gap:4px;">
+          ${dailyFilter === c.key ? `<span class="badge badge-sm badge-accent">Active</span>` : ""}
+          <button type="button" class="card-copy-btn" onclick="event.stopPropagation(); copyDailyPlatformUrls('${esc(c.key)}', '${esc(c.name)}')" aria-label="Copy all domain URLs from ${esc(c.name)}" title="Copy all domain URLs from ${esc(c.name)}">${I.copy}<span>URLs</span></button>
+        </span>
       </div>
       <div class="plat-count">${esc(Number(c.count).toLocaleString())}</div>
       <div class="plat-desc">${esc(c.desc)}</div>
-    </button>`).join("");
+    </div>`).join("");
 
   // Overview KPIs (strictly from real data)
   const confirmed = list.filter(r => r.classification === "Confirmed Impersonation").length;
@@ -227,6 +252,7 @@ function renderDailyResults(data, { scroll = true } = {}) {
 function renderDailyList() {
   if (!currentDailyResult) return;
   const rows = filteredDailyItems(currentDailyResult);
+  syncCopyUrlButtons(["btn-daily-copy-urls", "btn-daily-tab-copy-urls"], rows);
   const container = document.getElementById("daily-results-list");
   const pgEl = document.getElementById("daily-pagination");
   const pageSize = Number(document.getElementById("daily-page-size")?.value || 25);

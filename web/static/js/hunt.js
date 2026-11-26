@@ -379,6 +379,46 @@ function renderRiskDonut(data) {
     </div>`;
 }
 
+function copyHuntPlatformUrls(source) {
+  const items = (currentHunt?.candidates || []).filter(c => (c.sources || []).includes(source));
+  copyDomainUrls(items, SOURCE_LABELS[source] || source);
+}
+
+function isRecentTodayCandidate(c, todayIso = new Date().toISOString().slice(0, 10)) {
+  return (c.rdap?.age_days !== null && c.rdap?.age_days !== undefined && c.rdap.age_days <= 7) ||
+    (c.ct?.last_seen || "").startsWith(todayIso) ||
+    (c.intel || []).some(i => String(i.time || "").startsWith(todayIso));
+}
+
+function isBenignTileCandidate(c) {
+  return c.classification !== "Confirmed Impersonation" && c.verdict !== "phishing" &&
+    c.classification !== "Potential Impersonation" && c.classification !== "Inactive / Historical";
+}
+
+function copyHuntTileUrls(tileKey, label) {
+  const cands = currentHunt?.candidates || [];
+  const todayIso = new Date().toISOString().slice(0, 10);
+  let items = cands;
+  if (tileKey === "recent_today") items = cands.filter(c => isRecentTodayCandidate(c, todayIso));
+  else if (tileKey === "benign_all") items = cands.filter(isBenignTileCandidate);
+  else if (tileKey !== "all") {
+    const fn = (HUNT_FILTERS.find(([k]) => k === tileKey) || [])[2];
+    items = fn ? cands.filter(fn) : cands;
+  }
+  copyDomainUrls(items, label || tileKey);
+}
+
+function copyHuntUrls() {
+  if (!currentHunt) return showToast("Run or open a Brand Hunt first");
+  if (huntView === "intel") {
+    const intelItems = (currentHunt.candidates || []).filter(c => (c.intel || []).length > 0);
+    return copyDomainUrls(intelItems, "Engine Logs & Infra");
+  }
+  const activeFilterLabel = (HUNT_FILTERS.find(([k]) => k === huntFilter) || [, "Filtered"])[1];
+  const platSuffix = huntPlatformFilter !== "all" ? ` · ${SOURCE_LABELS[huntPlatformFilter] || huntPlatformFilter}` : "";
+  copyDomainUrls(filteredHuntCandidates(), `${activeFilterLabel}${platSuffix}`);
+}
+
 function setPlatformFilter(source) {
   const next = huntPlatformFilter === source ? "all" : (source || "all");
   huntPlatformFilter = next;
@@ -438,15 +478,19 @@ function renderPlatformSpotlight(data) {
   el.innerHTML = activePlatforms.slice(0, 6).map(src => {
     const [col, desc] = meta[src] || ["#2563eb", "Threat intelligence match"];
     const active = huntPlatformFilter === src;
+    const srcName = SOURCE_LABELS[src] || src;
     return `
-      <button type="button" class="plat-card${active ? " active" : ""}" style="--plat-color:${col}" onclick="setPlatformFilter('${esc(src)}')" title="Click to filter findings from ${esc(SOURCE_LABELS[src] || src)}">
+      <div role="button" tabindex="0" class="plat-card${active ? " active" : ""}" style="--plat-color:${col}" onclick="setPlatformFilter('${esc(src)}')" onkeydown="if(event.target===this&&(event.key==='Enter'||event.key===' ')){event.preventDefault();setPlatformFilter('${esc(src)}')}" title="Click to filter findings from ${esc(srcName)}">
         <div class="plat-head">
-          <span class="plat-name">${esc(SOURCE_LABELS[src] || src)}</span>
-          ${active ? `<span class="badge badge-sm badge-accent">Active</span>` : ""}
+          <span class="plat-name">${esc(srcName)}</span>
+          <span class="row" style="gap:4px;">
+            ${active ? `<span class="badge badge-sm badge-accent">Active</span>` : ""}
+            <button type="button" class="card-copy-btn" onclick="event.stopPropagation(); copyHuntPlatformUrls('${esc(src)}')" aria-label="Copy all domain URLs from ${esc(srcName)}" title="Copy all domain URLs from ${esc(srcName)}">${I.copy}<span>URLs</span></button>
+          </span>
         </div>
         <div class="plat-count">${counts[src].toLocaleString()}</div>
         <div class="plat-desc">${esc(desc)}</div>
-      </button>`;
+      </div>`;
   }).join("");
 
   if (rail) {
@@ -490,29 +534,28 @@ function renderHunt(data) {
   const inactiveCount = bc["Inactive / Historical"] ?? cands.filter(c => c.classification === "Inactive / Historical").length;
   const benignCount = bc["Benign/Unrelated"] ?? Math.max(0, cands.length - confirmedCount - potentialCount - inactiveCount);
   const todayIso = new Date().toISOString().slice(0, 10);
-  const recentCount = cands.filter(c =>
-    (c.rdap?.age_days !== null && c.rdap?.age_days !== undefined && c.rdap.age_days <= 7) ||
-    (c.ct?.last_seen || "").startsWith(todayIso) ||
-    (c.intel || []).some(i => String(i.time || "").startsWith(todayIso))
-  ).length;
+  const recentCount = cands.filter(c => isRecentTodayCandidate(c, todayIso)).length;
   const subCount = st.subdomain_impersonations ?? cands.filter(c => c.match_meta?.is_subdomain_impersonation || c.matching_subdomain).length;
 
   const tiles = [
-    ["Total Discovered", cands.length, "Unique domain findings", "kpi-blue", "all"],
-    ["Confirmed Impersonation", confirmedCount, "High-confidence threats", "kpi-danger", "confirmed_imp"],
-    ["Potential Impersonation", potentialCount, "Lookalikes & unverified hits", "kpi-warning", "potential_imp"],
-    ["Inactive / Historical", inactiveCount, "Feed-listed, domain gone (NXDOMAIN)", "kpi-muted", "inactive"],
-    ["Benign / Unrelated", benignCount, "Brand-owned & harmless matches", "kpi-muted", "live_unrelated"],
-    ["Recent / Today", recentCount, "Registered <=7d or seen today", "kpi-teal", "new"],
-    ["Subdomain Spoofs", subCount, "Brand in 3rd-party subdomain", "kpi-blue", "subdomain"],
+    ["Total Discovered", cands.length, "Unique domain findings", "kpi-blue", "all", "all"],
+    ["Confirmed Impersonation", confirmedCount, "High-confidence threats", "kpi-danger", "confirmed_imp", "confirmed_imp"],
+    ["Potential Impersonation", potentialCount, "Lookalikes & unverified hits", "kpi-warning", "potential_imp", "potential_imp"],
+    ["Inactive / Historical", inactiveCount, "Feed-listed, domain gone (NXDOMAIN)", "kpi-muted", "inactive", "inactive"],
+    ["Benign / Unrelated", benignCount, "Brand-owned & harmless matches", "kpi-muted", "live_unrelated", "benign_all"],
+    ["Recent / Today", recentCount, "Registered <=7d or seen today", "kpi-teal", "new", "recent_today"],
+    ["Subdomain Spoofs", subCount, "Brand in 3rd-party subdomain", "kpi-blue", "subdomain", "subdomain"],
   ];
   updateIocLinks(data);
-  document.getElementById("hunt-tiles").innerHTML = tiles.map(([label, val, sub, cls, filterKey]) => `
-    <button type="button" class="mini-card ${cls}" onclick="setHuntFilter('${filterKey}', true)">
-      <div class="mini-card-label">${esc(label)}</div>
+  document.getElementById("hunt-tiles").innerHTML = tiles.map(([label, val, sub, cls, filterKey, copyKey]) => `
+    <div role="button" tabindex="0" class="mini-card ${cls}" onclick="setHuntFilter('${filterKey}', true)" onkeydown="if(event.target===this&&(event.key==='Enter'||event.key===' ')){event.preventDefault();setHuntFilter('${filterKey}', true)}" title="Click to filter findings in ${esc(label)}">
+      <div class="mini-card-head">
+        <div class="mini-card-label">${esc(label)}</div>
+        <button type="button" class="card-copy-btn" onclick="event.stopPropagation(); copyHuntTileUrls('${copyKey}', '${esc(label)}')" aria-label="Copy all domain URLs in ${esc(label)}" title="Copy all domain URLs in ${esc(label)}">${I.copy}<span>URLs</span></button>
+      </div>
       <div class="mini-card-val">${esc(Number(val).toLocaleString())}</div>
       <div class="mini-card-sub">${esc(sub)}</div>
-    </button>`).join("");
+    </div>`).join("");
 
   renderHuntAnalyticsCharts(data);
   populateHuntDropdowns(data);
@@ -657,6 +700,7 @@ function scoreClass(s) {
 function renderHuntTable() {
   renderHuntFilters();
   const rows = filteredHuntCandidates();
+  syncCopyUrlButtons(["btn-hunt-copy-urls", "btn-hunt-tab-copy-urls"], rows);
   const tbody = document.getElementById("hunt-tbody");
   const pgEl = document.getElementById("hunt-pagination");
   const pageSize = Number(document.getElementById("hunt-page-size")?.value || 50);

@@ -209,10 +209,18 @@ def build_intel_plan(
     not_own = " ".join(f"-site:{d}" for d in allowlist[:4])
     b_toks = [t for t in tokens if len(t) >= 4][:5] or [brand]
     if b_toks:
-        bing_title = f'intitle:"{brand}" {not_own}'.strip()
-        add("bing", "dork", f"Bing web search: cloned title for {brand}", bing_title)
-        bing_sub = f"({' OR '.join(f'inurl:{t}' for t in b_toks[:4])}) (inurl:login OR inurl:portal OR inurl:sso OR site:workers.dev OR site:vercel.app) {not_own}".strip()
-        add("bing", "dork", "Bing dork: login & free-hosting impersonations", bing_sub)
+        # Prefer a concrete non-hyphenated brand title/token so Bing doesn't split "gi-de" into "gi" ("GI Tag").
+        bing_brand = (
+            next((t for t in (brand_titles or []) if "-" not in t and len(t) >= 4), "")
+            or next((t for t in b_toks if "-" not in t and len(t) >= 5), "")
+            or (brand_titles[0] if brand_titles else brand)
+        )
+        bing_title = f'intitle:"{bing_brand}" {not_own}'.strip()
+        add("bing", "dork", f"Bing web search: cloned title for {bing_brand}", bing_title)
+        clean_tok = next((t for t in b_toks if "-" not in t and len(t) >= 5), "") or next((t for t in b_toks if "-" not in t), b_toks[0])
+        hosting_sites = " OR ".join(f"site:{h}" for h in ("workers.dev", "vercel.app", "pages.dev", "netlify.app", "web.app"))
+        bing_sub = f'"{clean_tok}" ({hosting_sites}) {not_own}'.strip()
+        add("bing", "dork", f"Bing web search: {clean_tok} on free hosting platforms", bing_sub)
         ddg_q = f'("{brand}" OR {" OR ".join(f"inurl:{t}" for t in b_toks[:3])}) {not_own}'.strip()
         add("duckduckgo", "dork", f"DuckDuckGo search: {b_toks[0]} mentions outside official site", ddg_q)
     for tok in b_toks[:3]:

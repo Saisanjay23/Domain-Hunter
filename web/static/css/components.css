@@ -177,6 +177,18 @@
 .pf-badge { border-radius: 99px; font-weight: 650; }
 .plat-card { border-radius: 18px; background: var(--surface); }
 .plat-card.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak), var(--shadow-lg); }
+.mini-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
+.card-copy-btn {
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+  height: 22px; padding: 0 7px; border-radius: 7px;
+  border: 1px solid var(--border); background: color-mix(in srgb, var(--surface-2) 85%, transparent);
+  color: var(--text-muted); font-size: 10.5px; font-weight: 650; line-height: 1;
+  cursor: pointer; position: relative; z-index: 2;
+  transition: color var(--dur-1), border-color var(--dur-1), background var(--dur-1);
+}
+.card-copy-btn svg { width: 11px; height: 11px; flex-shrink: 0; }
+.card-copy-btn:hover { color: var(--accent); border-color: var(--accent-border); background: var(--accent-weak); }
+.plat-card:focus-visible, .mini-card:focus-visible { outline: none; box-shadow: var(--focus); }
 .donut-dot { box-shadow: 0 0 10px currentColor; }
 .alert { border-radius: 14px; backdrop-filter: blur(8px); }
 .empty { border-radius: 20px; border: 1px dashed var(--border-strong); background: color-mix(in srgb, var(--surface) 60%, transparent); }

@@ -50,12 +50,21 @@ VT_ENRICH_MAX = 12     # VirusTotal's free tier allows 4 lookups/min: only the m
 VT_ENRICH_BUDGET_S = 40
 STRONG_INTEL = {"favicon_hash", "asset_hash", "analytics", "hosting", "feed", "daily_domain", "daily_title", "subdomain_spoof", "whoisxml_brand", "whoisxml_discovery"}
 
-# Reverse image search mostly returns big legitimate platforms; never turn those into candidates.
+# Reverse image search and web search dorks often return big legitimate reference, WHOIS, review, or social
+# platforms; never turn those into impersonation candidates.
 LENS_IGNORE = {
-    "wikipedia.org", "wikimedia.org", "linkedin.com", "facebook.com", "instagram.com", "x.com", "twitter.com",
-    "youtube.com", "google.com", "pinterest.com", "reddit.com", "amazon.com", "crunchbase.com", "bloomberg.com",
-    "reuters.com", "glassdoor.com", "indeed.com", "ambitionbox.com", "seeklogo.com", "logo.wine", "brandfetch.com",
-    "worldvectorlogo.com", "1000logos.net", "wikidata.org", "zoominfo.com", "tracxn.com", "economictimes.com",
+    "wikipedia.org", "wikimedia.org", "wikiwand.com", "wikidata.org",
+    "linkedin.com", "facebook.com", "instagram.com", "x.com", "twitter.com",
+    "youtube.com", "tiktok.com", "pinterest.com", "reddit.com", "quora.com", "zhihu.com",
+    "google.com", "bing.com", "duckduckgo.com", "yandex.com", "baidu.com", "msn.com",
+    "amazon.com", "crunchbase.com", "bloomberg.com", "reuters.com", "forbes.com",
+    "indiatimes.com", "economictimes.com", "india.com",
+    "glassdoor.com", "indeed.com", "ambitionbox.com", "zoominfo.com", "tracxn.com",
+    "seeklogo.com", "logo.wine", "brandfetch.com", "worldvectorlogo.com", "1000logos.net",
+    "whois.com", "who.is", "scamadviser.com", "scam-detector.com", "trustpilot.com", "sitejabber.com",
+    "github.com", "gitlab.com", "bitbucket.org", "stackoverflow.com", "stackexchange.com",
+    "medium.com", "substack.com", "whatsapp.com", "wa.me", "t.me", "meta.com",
+    "virustotal.com", "urlscan.io", "crt.sh", "archive.org",
 }
 
 
@@ -144,6 +153,57 @@ def _enrich_virustotal(registered: List[Dict[str, Any]], errors: List[str], repo
 def _token_in(host: str, tokens: List[str]) -> bool:
     flat = host.replace("-", "")
     return any(t in host or t.replace("-", "") in flat for t in tokens)
+
+
+def _hit_mentions_brand(
+    hit: Dict[str, Any],
+    apex: str,
+    tokens: List[str],
+    brand_titles: List[str],
+) -> bool:
+    """Return True when a search hit's title or URL explicitly names a non-ambiguous brand identifier."""
+    hay = f"{hit.get('title') or ''} {hit.get('url') or ''}".lower()
+    if not hay.strip():
+        return False
+    if apex and apex.lower() in hay:
+        return True
+    for bt in brand_titles:
+        low = (bt or "").strip().lower()
+        if len(low) >= 5 and low in hay:
+            return True
+    for tok in tokens:
+        t = (tok or "").strip().lower()
+        # Require >= 5 chars when hyphenated so "gi-de" cannot match bare "gi" inside "GI Tag".
+        if len(t) >= (5 if "-" in t else 4) and re.search(rf"(?<![a-z0-9]){re.escape(t)}(?![a-z0-9])", hay):
+            return True
+    return False
+
+
+def _is_shared_hosting(host: str) -> bool:
+    h = normalize_host(host)
+    return any(h == root or h.endswith("." + root) for root in _SHARED_HOSTING_ROOTS)
+
+
+def _is_search_dork_false_positive(
+    hit: Dict[str, Any],
+    mm: Dict[str, Any],
+    host: str,
+    apex: str,
+    tokens: List[str],
+    brand_titles: List[str],
+) -> bool:
+    """Filter out unrelated blogs, news, directories, and fallback pages returned by search-engine RSS/HTML."""
+    if mm.get("is_own_domain") or mm.get("is_benign_collision"):
+        return True
+    src = hit.get("source")
+    tech = mm.get("technique_key")
+    if tech == "none":
+        if _is_shared_hosting(host):
+            return not (src == "wayback" or _hit_mentions_brand(hit, apex, tokens, brand_titles))
+        return True
+    if mm.get("keyword_strength") == "weak" and tech not in ("exact_brand_match",):
+        return not (mm.get("context_keywords") or _hit_mentions_brand(hit, apex, tokens, brand_titles))
+    return False
 
 
 def run_intel(plan: List[Dict[str, str]], lens_urls: List[str], cancel: Optional[threading.Event] = None) -> Dict[str, Any]:
@@ -360,7 +420,7 @@ def run_hunt(
                         infra["matches"].append(ref)
                 continue
             reg = registrable_domain(host) or host
-            if reg in allowlist or (h["match"] == "lens" and reg in LENS_IGNORE):
+            if reg in allowlist or (h["match"] in ("lens", "dork") and reg in LENS_IGNORE):
                 continue
             mm_in = evaluate_domain_match(host, apex, keywords=raw_keywords, allowlist=allowlist)
             # Subdomain spoofs keep full host; web search dork hits stay strictly tied to matching hosts or strong signals
@@ -368,7 +428,7 @@ def run_hunt(
                 key = host
             else:
                 key = reg
-            if h.get("source") in ("bing", "duckduckgo", "wayback") and mm_in["technique_key"] in ("none", "benign_collision") and mm_in["is_benign_collision"]:
+            if h.get("source") in ("bing", "duckduckgo", "wayback") and _is_search_dork_false_positive(h, mm_in, host, apex, tokens, brand_titles):
                 continue
             c = candidates.get(key)
             if c is None:

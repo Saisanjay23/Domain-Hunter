@@ -365,6 +365,7 @@ function schRenderDomain() {
         <div class="sch-actions">${act ? schPill(act.status) : schBtn("run-domain", "Run now", { id, batch: batch ? batch.id : "" }, "btn btn-primary btn-sm")}
           ${d.status === "active" ? schBtn("domain-status", "Pause", { id, status: "paused" }) : schBtn("domain-status", "Resume", { id, status: "active" })}
           ${schBtn("domain-tab", "Edit keywords", { tab: "settings" })}
+          ${schBtn("copy-urls", "Copy URLs", { id, view: ["new", "all", "confirmed", "potential", "inactive", "dismissed"].includes(tab) ? tab : "all" }, "btn btn-secondary btn-sm")}
           <a class="btn btn-secondary btn-sm" href="/api/scheduler/domains/${encodeURIComponent(id)}/export?format=csv&view=${["new", "confirmed", "potential"].includes(tab) ? tab : "all"}" download>Export CSV</a>
           <a class="btn btn-ghost btn-sm" href="/api/scheduler/domains/${encodeURIComponent(id)}/export?format=json&view=all" download>JSON</a></div></div></div>
       ${act ? `<div class="sch-panel"><h3>Scanning now</h3><div class="sch-progress"><div class="p-line"><span><b>${esc(act.message || act.stage || "Working")}</b></span><span>${Math.round(act.progress || 0)}%</span></div><div class="sch-bar"><span style="width:${Math.round(act.progress || 0)}%"></span></div></div></div>` : ""}
@@ -596,6 +597,19 @@ async function schAction(act, ds, el) {
     case "domain-status": await settingsCall("PATCH", `/api/scheduler/domains/${encodeURIComponent(id)}`, { status: ds.status }); showToast(ds.status === "paused" ? "Domain paused" : "Domain resumed"); break;
     case "remove-domain": return dmOpen({ type: "batch-remove", id: ds.batch, domainIds: [id], label: ds.name });
     case "domain-tab": SCH.domainTab = ds.tab; SCH.page = 1; SCH.selected.clear(); break;
+    case "copy-urls": {
+      const items = (SCH.list && SCH.list.items) || [];
+      const view = ds.view || "all";
+      const total = SCH.list ? Number(SCH.list.total || 0) : 0;
+      const domainUrlOf = f => safeExternalDomainUrl(f.host, f.final_url || f.url || "");
+      if (items.length && items.length >= total) {
+        copyDomainUrls(items, `${view} tab`, domainUrlOf);
+      } else {
+        const exp = await settingsCall("GET", `/api/scheduler/domains/${encodeURIComponent(id)}/export?format=json&view=${encodeURIComponent(view)}`);
+        copyDomainUrls(exp.findings || [], `${view} tab`, domainUrlOf);
+      }
+      return;
+    }
     case "page": { const p = Number(ds.p); if (!SCH.list || p < 1 || p > SCH.list.pages) return; SCH.page = p; break; }
     case "finding-history": return schFindingHistory(id, ds.host);
     case "investigate": if (typeof investigateDomain === "function") investigateDomain(ds.host); return;

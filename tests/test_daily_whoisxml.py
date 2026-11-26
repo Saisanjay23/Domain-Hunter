@@ -202,19 +202,24 @@ class TestDailyAndRefactoredUI:
         const jsDir = {json.dumps(str(static_dir / "js"))};
         const els = {{}};
         const mkEl = (id) => els[id] = els[id] || {{
-          id, value: '', checked: true, innerText: '', innerHTML: '', hidden: false,
+          id, value: '', checked: true, innerText: '', innerHTML: '', hidden: false, children: [],
           style: {{}}, dataset: {{}}, classList: {{ toggle(){{}}, add(){{}}, remove(){{}}, contains:()=>false }},
-          setAttribute(){{}}, removeAttribute(){{}}, scrollIntoView(){{}}, focus(){{}},
-          querySelectorAll: () => [], querySelector: () => null, closest: () => null
+          setAttribute(){{}}, removeAttribute(){{}}, appendChild(){{}}, removeChild(){{}}, remove(){{}}, select(){{}},
+          scrollIntoView(){{}}, focus(){{}},
+          querySelectorAll: () => [], querySelector: () => ({{ style: {{}}, onclick: null }}), closest: () => null
         }};
         const ctx = vm.createContext({{
           window: null, console, Math, Number, String, Array, Object, Set, Date, JSON, RegExp,
           encodeURIComponent, decodeURIComponent,
+          __copied: [],
+          navigator: {{ clipboard: {{ writeText: (t) => {{ ctx.__copied.push(t); return Promise.resolve(); }} }} }},
           localStorage: {{ getItem: () => null, setItem(){{}} }},
           fetch: () => Promise.resolve({{ ok: true, json: () => Promise.resolve({{}}) }}),
           setTimeout: () => 0, clearTimeout: () => {{}}, setInterval: () => 0,
           document: {{
-            documentElement: {{ dataset: {{}} }}, body: {{ classList: {{ toggle(){{}} }} }}, title: '',
+            documentElement: {{ dataset: {{}} }},
+            body: {{ classList: {{ toggle(){{}} }}, appendChild(){{}}, removeChild(){{}} }},
+            title: '', createElement: (tag) => mkEl('__el_' + tag),
             getElementById: mkEl, querySelectorAll: () => [], querySelector: () => null, addEventListener: () => {{}}
           }}
         }});
@@ -289,6 +294,49 @@ class TestDailyAndRefactoredUI:
           switchTab('overview');
           if (document.getElementById('landing-page').hidden !== true) {{
             throw new Error('Expected switchTab to hide landing page');
+          }}
+
+          // Verify Copy URLs helpers across tabs & cards
+          const NL = String.fromCharCode(10);
+          setPlatformFilter('all');
+          huntFilter = 'all';
+          copyHuntUrls();
+          if (__copied.at(-1) !== ['https://gi-de-login.xyz', 'https://gide-offline-phish.top'].join(NL)) {{
+            throw new Error('Unexpected copied hunt URLs: ' + __copied.at(-1));
+          }}
+          copyHuntPlatformUrls('wayback');
+          if (__copied.at(-1) !== 'https://gide-offline-phish.top') {{
+            throw new Error('Unexpected wayback platform URLs: ' + __copied.at(-1));
+          }}
+          copyHuntTileUrls('confirmed_imp', 'Confirmed Impersonation');
+          if (__copied.at(-1) !== 'https://gi-de-login.xyz') {{
+            throw new Error('Unexpected confirmed tile URLs: ' + __copied.at(-1));
+          }}
+          currentDailyResult = {{
+            target: 'gi-de.com',
+            results: [
+              {{ domain: 'gi-de.workers.dev', url: 'https://gi-de.workers.dev/login', platforms: ['urlscan'] }},
+              {{ domain: 'gi-de-auth.top', platforms: ['crt.sh'] }}
+            ]
+          }};
+          dailyFilter = 'all';
+          copyDailyUrls();
+          if (__copied.at(-1) !== ['https://gi-de-auth.top', 'https://gi-de.workers.dev/login'].join(NL)) {{
+            throw new Error('Unexpected daily URLs: ' + __copied.at(-1));
+          }}
+          copyDailyPlatformUrls('urlscan', 'URLScan.io');
+          if (__copied.at(-1) !== 'https://gi-de.workers.dev/login') {{
+            throw new Error('Unexpected daily urlscan URLs: ' + __copied.at(-1));
+          }}
+          currentCapturedDomains = {{ domains: [{{ domain: 'gi-de-login.xyz', url: 'https://gi-de-login.xyz/auth' }}] }};
+          copyCapturedUrls();
+          if (__copied.at(-1) !== 'https://gi-de-login.xyz/auth') {{
+            throw new Error('Unexpected captured URLs: ' + __copied.at(-1));
+          }}
+          currentInfra = {{ seed: 'gi-de.com', domains: [{{ domain: 'linked-kit.top' }}] }};
+          copyInfraUrls();
+          if (__copied.at(-1) !== 'https://linked-kit.top') {{
+            throw new Error('Unexpected infra URLs: ' + __copied.at(-1));
           }}
         `, ctx);
         """

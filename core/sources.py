@@ -644,9 +644,71 @@ def _has_challenge(resp: requests.Response) -> bool:
     return any(m in low for m in ("anomaly-modal", "captcha", "verify you are human", "challenge-form"))
 
 
+_BING_NOISE_HOSTS = {"bing.com", "msn.com"}
+
+
+def _unwrap_bing_href(href: str) -> str:
+    """Decode Bing `/ck/a` click-tracking redirect URLs back to their target URL."""
+    link = (href or "").strip()
+    if not link:
+        return ""
+    parsed = urlparse(link)
+    host = normalize_host(parsed.hostname or "")
+    if (host == "bing.com" or host.endswith(".bing.com")) and parsed.path.startswith("/ck/"):
+        u = (parse_qs(parsed.query).get("u") or [""])[0]
+        if u.startswith("a1") and len(u) > 2:
+            raw = u[2:]
+            try:
+                decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "ignore").strip()
+            except Exception:
+                return ""
+            if decoded.startswith(("http://", "https://")):
+                return decoded
+        return ""
+    return link
+
+
+def _bing_site_constraints(query: str) -> Tuple[set, set]:
+    """
+    Bing RSS often ignores `-site:` and `site:` operators when falling back to organic results.
+    Return `(excluded_sites, required_sites)` so `bing_search` can enforce them client-side.
+    """
+    excluded = {
+        s for s in (
+            normalize_host(raw.strip("*."))
+            for raw in re.findall(r"(?:^|[\s\(])-site:([^\s\)]+)", query, re.I)
+        ) if s
+    }
+    q_pos = re.sub(r"(?:^|[\s\(])-site:[^\s\)]+", " ", query, flags=re.I)
+    pos = {
+        s for s in (
+            normalize_host(raw.strip("*."))
+            for raw in re.findall(r"(?<![-\w])site:([^\s\)]+)", q_pos, re.I)
+        ) if s
+    }
+    if not pos:
+        return excluded, set()
+
+    def _strip_pure_site_group(m: re.Match) -> str:
+        branches = [b.strip() for b in re.split(r"\s+OR\s+", m.group(1), flags=re.I) if b.strip()]
+        if branches and all(re.match(r"^site:[^\s\)]+$", b, re.I) for b in branches):
+            return " "
+        return m.group(0)
+
+    rem = re.sub(r"\(([^()]+)\)", _strip_pure_site_group, q_pos)
+    rem = re.sub(r"(?<![-\w])site:[^\s\)]+", " ", rem, flags=re.I)
+    return excluded, (set() if re.search(r"\bOR\b", rem) else pos)
+
+
+def _host_matches_any(host: str, roots: set) -> bool:
+    return any(host == r or host.endswith("." + r) for r in roots)
+
+
 def bing_search(query: str, size: int = 30) -> List[Dict[str, Any]]:
     """
     Free automated web dork discovery via Bing's public XML RSS feed (no API key required).
+    Enforces `-site:` exclusions and pure `site:` filters client-side because Bing RSS
+    frequently ignores advanced operators.
     """
     q = (query or "").strip()
     if not q:
@@ -666,6 +728,7 @@ def bing_search(query: str, size: int = 30) -> List[Dict[str, Any]]:
     if resp.status_code >= 400:
         raise SourceError(f"bing HTTP {resp.status_code}")
 
+    excluded_sites, required_sites = _bing_site_constraints(q)
     hits: List[Dict[str, Any]] = []
     seen_hosts: set = set()
     try:
@@ -676,11 +739,15 @@ def bing_search(query: str, size: int = 30) -> List[Dict[str, Any]]:
 
     for item in items:
         title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
+        link = _unwrap_bing_href(item.findtext("link") or "")
         if not link:
             continue
         host = normalize_host(urlparse(link).hostname or "")
-        if not host or host in seen_hosts:
+        if not host or host in seen_hosts or _host_matches_any(host, _BING_NOISE_HOSTS):
+            continue
+        if excluded_sites and _host_matches_any(host, excluded_sites):
+            continue
+        if required_sites and not _host_matches_any(host, required_sites):
             continue
         seen_hosts.add(host)
         hits.append({"host": host, "ip": None, "port": None, "url": link, "title": title, "time": "", "source": "bing"})

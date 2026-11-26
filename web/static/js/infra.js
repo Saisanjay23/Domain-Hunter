@@ -247,6 +247,11 @@ function infraFocus(id) {
   infraGraph.select(id, true);
 }
 
+function copyInfraUrls() {
+  if (!currentInfra) return showToast("Run an Infrastructure investigation first");
+  copyDomainUrls(currentInfra.domains || [], "Infrastructure");
+}
+
 function exportInfra(kind) {
   if (!currentInfra) return;
   const name = `infra-${currentInfra.seed}`;

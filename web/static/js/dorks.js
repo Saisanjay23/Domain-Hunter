@@ -316,6 +316,10 @@ function copyCapturedDomains(apexOnly) {
   copyText(list.join("\n"), `Copied ${plural(list.length, apexOnly ? "apex domain" : "domain")}`);
 }
 
+function copyCapturedUrls() {
+  copyDomainUrls(filteredCapturedDomains(), "Captured Domains");
+}
+
 function exportCapturedDomainsCSV() {
   const rows = filteredCapturedDomains();
   if (!rows.length) return showToast("No domains to export");
