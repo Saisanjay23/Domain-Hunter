@@ -13,7 +13,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from api.deps import require_local, require_same_origin
 from api.routes.scheduler import actor, db, guarded
-from api.schemas import ConfirmRequest, DeleteBatchRequest, DeleteDomainRequest, DeleteFindingsRequest, DomainIdsRequest
+from api.schemas import ConfirmRequest, DeleteBatchRequest, DeleteDomainRequest, DeleteFindingsRequest, DomainIdsRequest, DataResetRequest
+from core import reset as reset_mod
 from core import scheduler_store as ss
 
 router = APIRouter()
@@ -104,3 +105,33 @@ def api_delete_batch(batch_id: str, req: DeleteBatchRequest, request: Request):
     ss.audit(d, actor(request), "batch.delete", "batch", b["_id"], {"name": b["name"], **{k: v for k, v in out.items() if k != "domains_deleted"},
                                                                     "domains_deleted": len(out.get("domains_deleted") or [])})
     return {"deleted": out}
+
+
+# ------------------------------------------------------------------ reset everything
+@router.get("/api/data/reset")
+def api_reset_preview(include_audit: bool = False):
+    return reset_mod.preview(db(), include_audit)
+
+
+@router.post("/api/data/reset", dependencies=DESTRUCTIVE)
+def api_reset(req: DataResetRequest, request: Request):
+    """Backs up every application collection to data/backups/, then deletes all application data (hunts, cases,
+    watchlist, alerts, scan batches, findings, investigations). Configuration is kept."""
+    if (req.confirm or "").strip() != reset_mod.CONFIRM_TEXT:
+        raise HTTPException(status_code=400, detail=f"Type {reset_mod.CONFIRM_TEXT} exactly to confirm")
+    d = db()
+    try:
+        out = reset_mod.reset_all(d, include_audit=req.include_audit, actor=actor(request))
+    except reset_mod.ResetError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    # in-memory state of this process: finished jobs and investigations are no longer backed by stored data
+    from api.routes import investigate
+    from api.services.jobs import HUNT_JOBS
+    for registry in (HUNT_JOBS, investigate.INVESTIGATIONS):
+        for k in [k for k, j in registry.items() if j.get("status") != "running"]:
+            registry.pop(k, None)
+    if req.clear_source_log:
+        from core import source_events
+        source_events.clear()
+    out["source_log_cleared"] = req.clear_source_log
+    return out

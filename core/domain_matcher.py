@@ -10,6 +10,7 @@ positives, and classifies every candidate with explainable match metadata.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 import unicodedata
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -847,12 +848,76 @@ def corroborating_evidence(cand: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(out))
 
 
+INACTIVE = "Inactive / Historical"
+CLASSIFICATIONS = ("Confirmed Impersonation", "Potential Impersonation", INACTIVE, "Benign/Unrelated")
+
+
+# A search hit only says how a page was found; a reputation listing says someone judged it malicious.
+REPUTATION_SOURCES = ("phishingdb", "openphish", "safebrowsing", "virustotal", "otx")
+LIVE_SIGHTING_SOURCES = ("urlscan", "openphish")   # observations of a live page (a scan, a live-URL feed)
+RECENT_SIGHTING_DAYS = 30
+
+
+def _live_evidence(cand: Dict[str, Any]) -> bool:
+    """Was this host ever seen live: inspected by us, scanned by URLScan, listed in a live-URL feed, or reported
+    with a timestamp in the last 30 days? Reputation lists alone (Phishing.Database, Safe Browsing) are not enough."""
+    ev = cand.get("evidence") or {}
+    http = ev.get("http") or {}
+    if http.get("status") or ev.get("title") or ev.get("password_form"):
+        return True
+    if any(src in LIVE_SIGHTING_SOURCES for src in cand.get("sources") or []):
+        return True
+    cutoff = datetime.now(timezone.utc) - timedelta(days=RECENT_SIGHTING_DAYS)
+    for i in cand.get("intel") or []:
+        if i.get("source") in LIVE_SIGHTING_SOURCES or (i.get("title") and i.get("source") not in ("safebrowsing", "virustotal")):
+            return True
+        t = str(i.get("time") or "")[:10]
+        try:
+            if t and datetime.strptime(t, "%Y-%m-%d").replace(tzinfo=timezone.utc) >= cutoff:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+_TITLE_SEP = r"[\-–—|:·•]"
+
+
+def _presents_as_brand(cand: Dict[str, Any]) -> bool:
+    """The page title names the brand as its own identity ("Amazon — Earth's Biggest Selection", "Sign in | PayPal",
+    "Amazon.com: Online Shopping") rather than mentioning it ("Probiotic sold on Amazon", "Amazon Landing Page Generator")."""
+    title = ((cand.get("evidence") or {}).get("title") or "").strip().lower()
+    if not title:
+        return False
+    mm = cand.get("match_meta") or {}
+    tokens = {t for t in (mm.get("matched_keyword"), split_host(cand.get("original_domain") or "")[1]) if t and len(t) >= 3}
+    for tok in tokens:
+        pat = rf"(^|{_TITLE_SEP}\s*){re.escape(tok.lower())}(\.[a-z]{{2,6}})?\s*({_TITLE_SEP}|[.,!]|$)"
+        if re.search(pat, title):
+            return True
+    return False
+
+
+def _impersonation_signals(cand: Dict[str, Any]) -> bool:
+    ev = cand.get("evidence") or {}
+    fav = ev.get("favicon") or {}
+    vd = ev.get("visual_distance")
+    return bool(_presents_as_brand(cand) or ev.get("password_form") or ev.get("brand_resources") or fav.get("exact_match")
+                or (vd is not None and vd <= 10) or (ev.get("title_similarity") or 0) >= 0.6
+                or ev.get("shared_analytics") or ev.get("cert_covers_brand")
+                or any(i.get("source") in REPUTATION_SOURCES or i.get("match") == "feed" for i in cand.get("intel") or [])
+                or (cand.get("match_meta") or {}).get("context_keywords"))
+
+
 def classify_candidate(cand: Dict[str, Any], score: Optional[int] = None, verdict: Optional[str] = None) -> str:
     """
-    Map detailed verdict + match signals into the 3 high-level analyst classifications:
+    Map detailed verdict + match signals into the high-level analyst classifications:
       - 'Confirmed Impersonation'  : high score AND independent corroboration beyond the domain name
       - 'Potential Impersonation'  : a name match or suspicious signals that still need analyst review
-      - 'Benign/Unrelated'
+      - 'Inactive / Historical'    : known from a feed / intel / scan but the domain no longer exists (NXDOMAIN) and
+                                     nothing live was observed: nothing to review today; reclassified if it comes back
+      - 'Benign/Unrelated'         : brand-owned, harmless collisions, and live third-party pages that only mention the
+                                     brand (no brand assets, no login form, no lure)
     """
     v = verdict or cand.get("verdict") or ""
     s = cand.get("score") if score is None else score
@@ -868,6 +933,15 @@ def classify_candidate(cand: Dict[str, Any], score: Optional[int] = None, verdic
         # Pre-computed by the scorer when available, otherwise derived from the candidate's own evidence.
         corroborated = cand["corroboration"] if "corroboration" in cand else corroborating_evidence(cand)
         return "Confirmed Impersonation" if corroborated else "Potential Impersonation"
+    # Dead: reported by a feed / intel source ("offline" verdict) but the domain does not exist any more (NXDOMAIN) and
+    # no live page was inspected. A taken-down phishing site is history, not a review item; it becomes Potential /
+    # Confirmed again if it returns. (A never-seen lookalike without DNS stays a Potential lead: it may be activated.)
+    if v == "offline" and cand.get("dns_status") == "nxdomain" and not _live_evidence(cand):
+        return INACTIVE
+    # A live, inspected third-party page that only mentions the brand (found by a title / text search) with no brand
+    # assets, no password form and no lure wording is commentary or commerce about the brand, not impersonation.
+    if v == "live_unrelated" and mm.get("technique_key") == "content_infrastructure" and not _impersonation_signals(cand):
+        return "Benign/Unrelated"
     if v in ("suspicious", "offline", "parked") or s >= 35 or (mm.get("is_subdomain_impersonation") and not weak_kw) \
             or (mm.get("is_idn") and mm.get("mixed_script")):
         return "Potential Impersonation"

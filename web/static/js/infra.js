@@ -93,6 +93,7 @@ async function pollInvestigation() {
     if (job.status === "done") {
       currentInfra = job.result;
       renderInfra(job.result);
+      loadInfraHistory();
     } else {
       showToast(job.message || "Investigation stopped", 4200);
     }
@@ -127,6 +128,7 @@ function gaugeSvg(value) {
 }
 
 function renderInfra(data) {
+  renderInfraChanges(data);
   const a = data.actor || {};
   const s = data.stats || {};
   const ips = new Set((data.nodes || []).filter(n => n.type === "ip").map(n => n.label));
@@ -623,3 +625,93 @@ class InfraGraph {
     if (opt === "physics") { this.running = !this.running; btn.classList.toggle("on", this.running); if (this.running) this.alpha = 0.5; }
   }
 }
+
+// ----------------------------------------------------------------------------- investigation history (MongoDB)
+const INFRA_HIST = { q: "", items: [], total: 0, limit: 8 };
+const INFRA_MODE = { malicious: ["badge-danger", "Malicious"], suspicious: ["badge-warning", "Suspicious"], unclear: ["", "Unclear"], legitimate: ["badge-success", "Legitimate"] };
+
+async function loadInfraHistory() {
+  const box = document.getElementById("infra-history");
+  if (!box) return;
+  try {
+    const qs = new URLSearchParams({ q: INFRA_HIST.q, limit: INFRA_HIST.limit });
+    const r = await (await fetch(`/api/investigations?${qs}`)).json();
+    INFRA_HIST.items = r.items || [];
+    INFRA_HIST.total = r.total || 0;
+    renderInfraHistory();
+  } catch (e) { box.innerHTML = ""; }
+}
+
+function renderInfraHistory() {
+  const box = document.getElementById("infra-history");
+  const rows = INFRA_HIST.items.map(i => {
+    const s = i.summary || {}, [cls, label] = INFRA_MODE[s.mode] || ["", s.mode || "—"];
+    return `<div class="infra-hrow"><div class="infra-hmain"><button type="button" class="infra-hseed" data-infra-h="open" data-id="${esc(i.id)}">${esc(i.seed)}</button>
+        <span class="hint">${esc(typeof ago === "function" ? ago(i.created) : new Date(i.created * 1000).toLocaleString())} · ${esc(s.domains ?? 0)} domains · ${esc(s.linked_high ?? 0)} high / ${esc(s.linked_medium ?? 0)} medium links${s.sophistication != null ? ` · sophistication ${esc(s.sophistication)}` : ""}</span></div>
+      <span class="badge badge-sm ${cls}">${esc(label)}</span>
+      <div class="row" style="gap:4px"><button type="button" class="btn btn-secondary btn-xs" data-infra-h="open" data-id="${esc(i.id)}">Open</button>
+        <a class="btn btn-ghost btn-xs" href="/api/investigate/${encodeURIComponent(i.id)}/iocs.csv" download>IOCs</a>
+        <button type="button" class="btn btn-danger-ghost btn-xs" data-infra-h="delete" data-id="${esc(i.id)}" data-seed="${esc(i.seed)}">Delete</button></div></div>`;
+  }).join("");
+  const more = INFRA_HIST.total > INFRA_HIST.items.length;
+  box.innerHTML = (INFRA_HIST.total || INFRA_HIST.q) ? `
+    <div class="row" style="justify-content:space-between;gap:8px;flex-wrap:wrap"><span class="section-label" style="margin:0">Recent investigations <span class="hint">(${esc(INFRA_HIST.total)})</span></span>
+      <input type="search" class="input" id="infra-hist-q" placeholder="Search seeds" value="${esc(INFRA_HIST.q)}" maxlength="100" style="max-width:220px;height:32px"></div>
+    <div class="infra-hlist">${rows || `<div class="hint">No investigation matches.</div>`}</div>
+    ${more ? `<button type="button" class="btn btn-ghost btn-xs" data-infra-h="more">Show more (${esc(INFRA_HIST.total - INFRA_HIST.items.length)})</button>` : ""}` : "";
+}
+
+async function openInfraHistory(id) {
+  try {
+    const r = await fetch(`/api/investigations/${encodeURIComponent(id)}`);
+    if (!r.ok) throw new Error((await r.json()).detail || `HTTP ${r.status}`);
+    const data = await r.json();
+    currentInfra = data;
+    setInfraTarget(data.seed || "");
+    renderInfra(data);
+    document.getElementById("infra-results-section").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (err) { showToast(err.message || "Could not open the investigation", 4200, "danger"); }
+}
+
+function renderInfraChanges(data) {
+  const el = document.getElementById("infra-changes");
+  if (!el) return;
+  const c = data && data.changes;
+  const saved = data && data.history ? `Saved investigation from ${new Date(data.history.created * 1000).toLocaleString()}.` : "";
+  if (!c) { el.innerHTML = saved ? `<div class="hint" style="margin-bottom:8px">${esc(saved)}</div>` : ""; return; }
+  const list = (a, n = 6) => a.length ? esc(a.slice(0, n).join(", ")) + (a.length > n ? ` +${a.length - n}` : "") : "none";
+  el.innerHTML = `<div class="alert alert-info" style="margin-bottom:10px">${I.alert}<div><strong>Since the previous investigation of this seed</strong> (${esc(new Date(c.previous_at * 1000).toLocaleString())}):
+    ${c.new_domains.length} new domain(s): ${list(c.new_domains)} · ${c.newly_linked.length} newly linked: ${list(c.newly_linked)} · ${c.gone_domains.length} no longer seen: ${list(c.gone_domains)}.
+    ${saved ? `<div class="hint">${esc(saved)}</div>` : ""}</div></div>`;
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-infra-h]");
+  if (!b) return;
+  e.preventDefault();
+  const id = b.dataset.id;
+  if (b.dataset.infraH === "open") return openInfraHistory(id);
+  if (b.dataset.infraH === "more") { INFRA_HIST.limit += 20; return loadInfraHistory(); }
+  if (b.dataset.infraH === "delete") {
+    if (!window.confirm(`Delete the saved investigation of ${b.dataset.seed}? This cannot be undone.`)) return;
+    try {
+      const r = await fetch(`/api/investigations/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!r.ok) throw new Error((await r.json()).detail || `HTTP ${r.status}`);
+      showToast("Investigation deleted");
+      if (currentInfra && currentInfra.id === id) { currentInfra = null; showOnlySection(null); }
+      loadInfraHistory();
+    } catch (err) { showToast(err.message, 4200, "danger"); }
+  }
+});
+
+let infraHistTimer = null;
+document.addEventListener("input", e => {
+  if (e.target.id !== "infra-hist-q") return;
+  clearTimeout(infraHistTimer);
+  infraHistTimer = setTimeout(async () => {
+    INFRA_HIST.q = e.target.value.trim();
+    await loadInfraHistory();
+    const q = document.getElementById("infra-hist-q");
+    if (q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
+  }, 300);
+});

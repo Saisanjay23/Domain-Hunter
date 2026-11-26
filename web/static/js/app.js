@@ -13,7 +13,7 @@ const PAGE_META = {
   reverse: ["Logo Check", "Compare suspect images against your brand"],
   aggregator: ["Hash Tools", "Combine hashes into platform queries"],
   impersonation: ["OSINT Dorks", "Generate reconnaissance queries & capture domains"],
-  storage: ["Storage", "MongoDB connection and legacy import"],
+  storage: ["Storage", "MongoDB connection"],
   history: ["History", "Saved brand hunts"],
   watch: ["Watchlist", "Automated scheduled monitoring"],
   scheduler: ["Scan Scheduler", "Batches of monitored domains, scanned automatically on their schedules"],
@@ -170,6 +170,7 @@ function switchTab(tab) {
   else if (tab === "infra") {
     showOnlySection(typeof currentInfra !== "undefined" && currentInfra ? "infra-results-section" : null);
     if (typeof infraGraph !== "undefined" && infraGraph) requestAnimationFrame(() => { infraGraph.resize(); });
+    if (typeof loadInfraHistory === "function") loadInfraHistory();
   }
   else if (tab === "keys") { showOnlySection(null); loadKeys(); }
   else if (tab === "history") { showOnlySection(null); loadHistory(); }

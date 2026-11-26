@@ -170,11 +170,6 @@ Examples:
         help="Impersonation hunt: find live lookalike / phishing domains of a brand (e.g. --hunt adani.com)",
     )
     group.add_argument(
-        "--migrate-history",
-        action="store_true",
-        help="Import a legacy SQLite history file (data/hunter.db or BRAND_HUNTER_DB) into MongoDB: backup, copy, validate. The file is kept.",
-    )
-    group.add_argument(
         "--ui",
         action="store_true",
         help="Launch interactive Web UI dashboard on http://127.0.0.1:8080",
@@ -243,32 +238,6 @@ Examples:
         from app import start_server
         start_server()
         return
-
-    if args.migrate_history:
-        from core.migrate import legacy_candidates, migrate_sqlite
-        from core.store import StoreUnavailable, get_store
-
-        try:
-            active = get_store()
-        except StoreUnavailable as e:
-            print(f"[-] {e}", file=sys.stderr)
-            sys.exit(1)
-        files = legacy_candidates()
-        if not files:
-            print("[-] No legacy SQLite history found (data/hunter.db or BRAND_HUNTER_DB).", file=sys.stderr)
-            sys.exit(1)
-        failed = False
-        for path in files:
-            rep = migrate_sqlite(path, active)
-            c, v = rep["copied"], rep["validation"]
-            print(f"[+] {path}")
-            print(f"    backup: {rep['backup']['path']}")
-            print(f"    copied {c['hunts']} hunt(s), {c['triage']} case note(s), {c['watchlist']} watched brand(s) "
-                  f"({c['watchlist_skipped']} already present), {c['alerts']} alert(s) ({c['alerts_skipped']} already present)")
-            print(f"    validation: {'OK' if v['ok'] else 'MISMATCH ' + str(v)}")
-            failed = failed or not v["ok"]
-        print("[i] The SQLite file and its backup were left in place. Delete them yourself once you have checked the data.")
-        sys.exit(1 if failed else 0)
 
     if args.hunt:
         run_hunt_cli(args)

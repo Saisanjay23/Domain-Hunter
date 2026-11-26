@@ -1,0 +1,7 @@
+# One fixed rule set for everyone (and for tools/check.py). Never run `ruff check --fix` with a hand-picked
+# --select: rules that are not selected make their `# noqa` markers look "unused" and RUF100 would delete them.
+line-length = 160
+extend-exclude = ["data", "web"]
+
+[lint]
+select = ["F", "E9", "B006", "B008", "B015", "B018"]

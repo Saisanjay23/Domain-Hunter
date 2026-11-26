@@ -885,6 +885,7 @@
             <div class="bar"><span id="infra-progress-bar"></span></div>
             <div class="hint" id="infra-progress-msg"></div>
           </div>
+          <div class="infra-history" id="infra-history" aria-live="polite"></div>
         </form>
 
         <!-- 5. ASSET SCAN FORM (Direct Child #5: #single-scan-form) -->
@@ -1130,27 +1131,16 @@
               <div>Locked by environment variables.</div>
             </div>
             <div class="grid-2">
-              <input class="input mono" id="mongo-uri" placeholder="mongodb://127.0.0.1:27017">
-              <input class="input mono" id="mongo-db" placeholder="brand_hunter">
+              <input class="input mono" id="mongo-uri" placeholder="mongodb://127.0.0.1:27017" autocomplete="off">
+              <input class="input mono" id="mongo-db" placeholder="brand_hunter" autocomplete="off">
             </div>
             <div id="storage-test-result"></div>
             <div class="row">
               <button type="button" class="btn btn-secondary" onclick="testStorage(this)">Test</button>
               <button type="submit" class="btn btn-primary" id="btn-storage-save">Save MongoDB</button>
-              <button type="button" class="btn btn-danger-ghost" id="btn-storage-clear" hidden
-                onclick="clearStorage()">Use SQLite</button>
+              <button type="button" class="btn btn-danger-ghost" id="btn-storage-clear" hidden onclick="clearStorage()">Use local default</button>
             </div>
           </form>
-          <div class="card card-body stack" id="storage-migrate-card" hidden>
-            <p class="card-sub" id="storage-migrate-info"></p>
-            <div id="storage-migrate-result"></div>
-            <div class="row">
-              <button type="button" class="btn btn-secondary" id="btn-migrate-up"
-                onclick="migrateStorage('to_mongodb', this)">SQLite &rarr; MongoDB</button>
-              <button type="button" class="btn btn-ghost" onclick="migrateStorage('to_sqlite', this)">MongoDB &rarr;
-                SQLite</button>
-            </div>
-          </div>
         </section>
 
         <!-- SCAN SCHEDULER PAGE (rendered by js/scheduler.js from /api/scheduler/*) -->
@@ -1541,6 +1531,7 @@
         </section>
 
         <section class="stack" id="infra-results-section" hidden>
+          <div id="infra-changes"></div>
           <div class="infra-hero" id="infra-hero"></div>
           <div class="infra-stage" id="infra-stage">
             <canvas aria-label="Infrastructure graph: drag to move, scroll to zoom, click a node for evidence"></canvas>

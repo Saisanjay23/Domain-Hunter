@@ -1,11 +1,13 @@
 """Test isolation: every test gets its own (in-memory MongoDB) database and no background scheduler."""
+import faulthandler
 import os
 import sys
 
 import pytest
 
 os.environ["BRAND_HUNTER_SCHEDULER"] = "0"
-os.environ.setdefault("BRAND_HUNTER_RATE_LIMIT", "0")   # the limiter has its own tests (test_security.py)
+os.environ.setdefault("BRAND_HUNTER_RATE_LIMIT", "0")
+HANG_LOG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".pytest-hang.log")   # the limiter has its own tests (test_security.py)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -44,3 +46,23 @@ def isolated_store():
     yield s
     store.set_store(None)
     s.close()
+
+
+@pytest.fixture(autouse=True)
+def hang_guard():
+    """A test that hangs is stopped with a stack dump of every thread instead of blocking the run forever
+    (BRAND_HUNTER_TEST_TIMEOUT seconds per test, default 180; 0 disables)."""
+    seconds = int(os.environ.get("BRAND_HUNTER_TEST_TIMEOUT", "180") or 0)
+    if seconds <= 0:
+        yield
+        return
+    # pytest captures stderr at file level (and loses it on a hard exit), so the dump goes to a file
+    with open(HANG_LOG, "w", encoding="utf-8") as log:
+        log.write(f"Test exceeded {seconds}s and was stopped. Stacks of every thread:\n")
+        log.flush()
+        faulthandler.dump_traceback_later(seconds, exit=True, file=log)
+        try:
+            yield
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+    os.remove(HANG_LOG)

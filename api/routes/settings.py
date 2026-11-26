@@ -1,7 +1,6 @@
 """Local-only API key settings, rotation control, and storage backend routes."""
 
 from importlib.metadata import PackageNotFoundError, version as _version
-import os
 import time
 from typing import Any, Dict, Optional
 
@@ -11,7 +10,6 @@ from api.deps import app_attr, require_local
 from api.schemas import (
     AddKeyRequest,
     KeyRefRequest,
-    MigrateRequest,
     ResetRequest,
     SaveKeysRequest,
     StorageUriRequest,
@@ -33,10 +31,9 @@ from core.config import (
     save_keys,
 )
 from core.keypool import POOL, SourceError as PoolError
-from core import migrate as legacy_migrate
 from core.mongouri import describe_uri, resolve_db_name
 from core.sources import check_key as core_check_key
-from core.store import DEFAULT_MONGODB_URI, StoreError, StoreUnavailable, configured_uri, get_store
+from core.store import DEFAULT_MONGODB_URI, StoreUnavailable, configured_uri, get_store
 
 router = APIRouter()
 
@@ -158,18 +155,6 @@ def _pkg_version(name: str) -> str:
         return "not installed"
 
 
-def _legacy_files() -> list:
-    out = []
-    for path in legacy_migrate.legacy_candidates():
-        item: Dict[str, Any] = {"path": path, "size": os.path.getsize(path)}
-        try:
-            item["counts"] = legacy_migrate.sqlite_counts(path)
-        except Exception as e:  # an unreadable file is reported, never fatal
-            item["error"] = f"{e.__class__.__name__}"
-        out.append(item)
-    return out
-
-
 def storage_status() -> Dict[str, Any]:
     uri, explicit = configured_uri()
     name = core_config.get("MONGODB_DB")
@@ -178,17 +163,15 @@ def storage_status() -> Dict[str, Any]:
         "configured": "mongodb", "explicit": explicit, "origin": field["origin"] if explicit else "default",
         "editable": field["editable"], "default_uri": DEFAULT_MONGODB_URI,
         "uri": {**describe_uri(uri), "database": resolve_db_name(uri, name)},
-        "driver": f"pymongo {_pkg_version('pymongo')}", "legacy": _legacy_files(),
+        "driver": f"pymongo {_pkg_version('pymongo')}",
     }
     try:
         store = get_store()
         out.update(connected=True, active=store.backend, stats=store.stats(), error=None)
-        try:
-            out["migrations"] = legacy_migrate.migration_history(store)
-        except Exception:
-            out["migrations"] = []
+        from core.scheduler_store import supports_transactions
+        out["transactions"] = supports_transactions(store.db)
     except StoreUnavailable as e:
-        out.update(connected=False, active=None, stats=None, error=str(e), migrations=[])
+        out.update(connected=False, active=None, stats=None, error=str(e))
     return out
 
 
@@ -242,23 +225,3 @@ def api_storage_clear():
     except SettingsError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return storage_status()
-
-
-@router.post("/api/storage/migrate", dependencies=[Depends(require_local)])
-def api_storage_migrate(req: MigrateRequest):
-    """Imports a legacy SQLite file into MongoDB: backup, idempotent copy, count validation. The file is never deleted."""
-    if req.direction != "from_sqlite":
-        raise HTTPException(status_code=400, detail="direction must be from_sqlite")
-    files = legacy_migrate.legacy_candidates()
-    if not files:
-        raise HTTPException(status_code=400, detail="There is no legacy SQLite history to import.")
-    active = get_store()
-    reports = []
-    for path in files:
-        try:
-            reports.append(legacy_migrate.migrate_sqlite(path, active))
-        except (StoreError, RuntimeError, OSError) as e:
-            raise HTTPException(status_code=400, detail=f"Import of {os.path.basename(path)} stopped: {e}")
-    copied = {k: sum(r["copied"].get(k, 0) for r in reports) for k in reports[0]["copied"]}
-    return {"direction": req.direction, "copied": copied, "reports": reports,
-            "ok": all(r["validation"]["ok"] for r in reports), "status": storage_status()}

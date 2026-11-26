@@ -600,6 +600,7 @@ def run_hunt(
         suspicious=by_verdict.get("suspicious", 0),
         confirmed_impersonation=by_classification.get("Confirmed Impersonation", 0),
         potential_impersonation=by_classification.get("Potential Impersonation", 0),
+        inactive_historical=by_classification.get("Inactive / Historical", 0),
         subdomain_impersonations=sum(1 for c in registered if (c.get("match_meta") or {}).get("is_subdomain_impersonation")),
         elapsed_sec=round(time.time() - t0, 1),
     )

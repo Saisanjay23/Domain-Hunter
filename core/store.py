@@ -8,9 +8,6 @@ mongodb://127.0.0.1:27017 is used. get_store() re-reads the configuration on eve
 connection string in the UI switches the connection immediately. If the server cannot be reached the
 app reports StoreUnavailable; it never silently falls back to another database.
 
-Data from the retired SQLite backend (data/hunter.db) can be imported with core.migrate
-(Settings > Storage > "Import legacy SQLite file", or `python favicon_hash.py --migrate-history`).
-
 Brand identity is the hunt's apex domain (e.g. "paypal.com"). Webhook URLs are secrets (Slack/Teams
 URLs carry a token): they are stored but only a masked hint is ever returned to the browser.
 """

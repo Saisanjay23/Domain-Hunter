@@ -438,6 +438,125 @@ class TestEngine:
         assert db.batch_executions.count_documents({}) == 0
 
 
+class TestDismissal:
+    def test_dismissed_findings_stay_hidden_and_silent_until_confirmed(self, db, engine, hunts):
+        state = {"c": [cand("fp-paypal.com", 50), cand("lead-paypal.com", 55)]}
+        hunts.script = {"paypal.com": lambda: state["c"]}
+        b = make_batch(db)
+        run_now(db, engine, b)
+        pp = domain_id(db, "paypal.com")
+        assert ss.set_dismissed(db, pp, [f"{pp}:fp-paypal.com", "md_000000000000:x.com"], True, "partner site") == 1   # other domains ignored
+        assert [f["host"] for f in ss.list_findings(db, pp)["items"]] == ["lead-paypal.com"]
+        assert [f["host"] for f in ss.list_findings(db, pp, view="dismissed")["items"]] == ["fp-paypal.com"]
+        assert ss.findings_counts(db, [pp])["dismissed"] == 1 and ss.findings_counts(db, [pp])["total"] == 1
+        f = db.impersonation_findings.find_one({"_id": f"{pp}:fp-paypal.com"})
+        assert f["dismissed_reason"] == "partner site"
+
+        db.alerts.delete_many({})
+        state["c"] = [cand("fp-paypal.com", 52), cand("lead-paypal.com", 55)]
+        run_now(db, engine, b)                                                    # rescan: still dismissed
+        assert db.impersonation_findings.find_one({"_id": f"{pp}:fp-paypal.com"})["dismissed"] is True
+
+        state["c"] = [cand("fp-paypal.com", 90, "Confirmed Impersonation", "phishing"), cand("lead-paypal.com", 55)]
+        e = run_now(db, engine, b)                                                 # now confirmed: back in review
+        f = db.impersonation_findings.find_one({"_id": f"{pp}:fp-paypal.com"})
+        assert f["dismissed"] is False and f.get("escalated_at")
+        job = db.scan_jobs.find_one({"execution_id": e["_id"]})
+        assert job["counts"].get("escalated") == 1
+
+    def test_dismissed_new_findings_do_not_alert(self, db, engine, hunts):
+        hunts.script = {"paypal.com": [cand("a-paypal.com", 60)]}
+        b = make_batch(db)
+        ex = ss.create_execution(db, b, "manual")
+        engine.tick(run_inline=True)
+        pp = domain_id(db, "paypal.com")
+        db.alerts.delete_many({})
+        ss.set_dismissed(db, pp, [f"{pp}:a-paypal.com"], True)
+        engine._notify(db, db.batch_executions.find_one({"_id": ex["_id"]}))
+        assert not any("new impersonation" in a["title"] for a in get_store().alert_list())
+
+
+class TestCountersAndRetention:
+    def test_stored_counters_always_match_a_live_count(self, db, engine, hunts):
+        state = {"c": [cand(f"h{i}-paypal.com", 40 + i) for i in range(12)]}
+        hunts.script = {"paypal.com": lambda: state["c"], "microsoft.com": [cand("m-1.com", 75, "Confirmed Impersonation", "phishing")]}
+        b = make_batch(db, domains=(("paypal.com", []), ("microsoft.com", [])))
+        ids = ss.batch_domain_ids(db, b["_id"])
+        pp = domain_id(db, "paypal.com")
+
+        def check():
+            assert ss.findings_counts(db, ids) == ss._findings_counts_live(db, ids)
+            for i in ids:
+                assert ss.findings_counts(db, [i]) == ss._findings_counts_live(db, [i])
+        run_now(db, engine, b)
+        check()
+        state["c"] = state["c"][3:] + [cand("new-paypal.com", 66)]
+        state["c"][0] = cand("h3-paypal.com", 99, "Confirmed Impersonation", "phishing")
+        run_now(db, engine, b)
+        check()
+        ss.set_dismissed(db, pp, [f"{pp}:h4-paypal.com", f"{pp}:h5-paypal.com"], True)
+        check()
+        ss.delete_findings(db, pp, [f"{pp}:h6-paypal.com"])
+        check()
+        ss.clear_domain_history(db, pp)
+        check()
+        assert db.monitored_domains.find_one({"_id": pp})["stats"]["observations"] == 0
+        db.monitored_domains.update_many({}, {"$unset": {"stats": 1}})        # older data without counters
+        check()
+
+    def test_only_changes_are_recorded_and_retention_is_applied(self, db, engine, hunts):
+        hunts.script = {"paypal.com": [cand("a-paypal.com", 60), cand("b-paypal.com", 61)]}
+        b = make_batch(db)
+        run_now(db, engine, b)
+        run_now(db, engine, b)                                               # identical second scan
+        pp = domain_id(db, "paypal.com")
+        assert [o["change"] for o in db.scan_observations.find({"domain_id": pp})] == ["new", "new"]
+        assert db.impersonation_findings.find_one({"_id": f"{pp}:a-paypal.com"})["lifecycle"] == "seen"
+        o = db.scan_observations.find_one({"domain_id": pp})
+        assert o["observed_dt"].year >= 2024                                  # the TTL field
+        ttl = db.scan_observations.index_information()["observed_dt_ttl"]
+        assert ttl["expireAfterSeconds"] == 365 * 86400
+        ss.update_settings(db, {"observation_retention_days": 30})
+        assert db.scan_observations.index_information()["observed_dt_ttl"]["expireAfterSeconds"] == 30 * 86400
+        with pytest.raises(ss.DataError):
+            ss.update_settings(db, {"observation_retention_days": 1})
+
+
+class TestAtomicDeletes:
+    def test_interrupted_delete_rolls_back_or_is_finished_by_the_engine(self, db, engine, hunts):
+        hunts.script = {"paypal.com": [cand("x-paypal.com")], "netflix.com": [cand("y-netflix.com")]}
+        b = make_batch(db, domains=(("paypal.com", []), ("netflix.com", [])))
+        run_now(db, engine, b)
+        pp, nf = domain_id(db, "paypal.com"), domain_id(db, "netflix.com")
+        with mock.patch.object(ss, "refresh_execution_totals", side_effect=RuntimeError("process died mid-delete")):
+            with pytest.raises(RuntimeError):
+                ss.delete_domain(db, pp)
+        if ss.supports_transactions(db):
+            # one transaction: nothing was deleted, nothing is left half-done
+            assert db.impersonation_findings.count_documents({"domain_id": pp}) == 1
+            assert not db.monitored_domains.find_one({"_id": pp}).get("deleting")
+            out = ss.delete_domain(db, pp)
+            assert out["transaction"] is True
+        else:
+            # standalone: the target is hidden at once and the engine finishes the idempotent delete
+            assert db.monitored_domains.find_one({"_id": pp})["deleting"] is True
+            with pytest.raises(ss.NotFound):
+                ss.get_domain(db, pp)
+            assert pp not in [d["id"] for d in ss.data_summary(db)["domains"]]
+            assert ss.finish_interrupted_deletes(db, older_than=-1) == [pp]
+        assert db.monitored_domains.find_one({"_id": pp}) is None
+        assert db.impersonation_findings.count_documents({"domain_id": pp}) == 0
+        assert db.impersonation_findings.count_documents({"domain_id": nf}) == 1          # the other domain is untouched
+
+    def test_conflict_inside_the_delete_changes_nothing(self, db, engine):
+        b = make_batch(db)
+        ss.create_execution(db, b, "manual")
+        db.scan_jobs.update_many({}, {"$set": {"status": "running"}})
+        with pytest.raises(ss.Conflict):
+            ss.delete_domain(db, domain_id(db, "paypal.com"))
+        assert not db.monitored_domains.find_one({"domain": "paypal.com"}).get("deleting")
+
+
 # ============================================================== API
 @pytest.fixture
 def client(db, engine):
@@ -509,6 +628,28 @@ class TestApi:
         assert client.get(f"/api/scheduler/domains/{pp}/export?format=json").json()["domain"] == "paypal.com"
         ex = client.post(f"/api/scheduler/domains/{pp}/run", json={}).json()["execution"]
         assert ex["total"] == 1 and ex["trigger"] == "manual_domain"
+
+    def test_batch_export_dismiss_api_and_health(self, client, db, engine, hunts):
+        hunts.script = {"paypal.com": [cand("p1.com", 60)], "microsoft.com": [cand("m1.com", 70)]}
+        bid = self._create(client)["batch"]["id"]
+        client.post(f"/api/scheduler/batches/{bid}/run")
+        engine.tick(run_inline=True)
+        text = client.get(f"/api/scheduler/batches/{bid}/export?format=csv").text
+        assert "p1.com" in text and "m1.com" in text and text.splitlines()[0].endswith("dismissed")
+        js = client.get(f"/api/scheduler/batches/{bid}/export?format=json").json()
+        assert js["batch"] == "Banks" and {f["original_domain"] for f in js["findings"]} == {"paypal.com", "microsoft.com"}
+        pp = domain_id(db, "paypal.com")
+        assert client.post(f"/api/scheduler/domains/{pp}/findings/dismiss", json={"ids": [f"{pp}:p1.com"], "reason": "ok"}).json()["updated"] == 1
+        assert "p1.com" not in client.get(f"/api/scheduler/batches/{bid}/export?format=csv").text
+        assert "p1.com" in client.get(f"/api/scheduler/batches/{bid}/export?format=csv&view=dismissed").text
+        r = client.get("/api/scheduler/health")
+        assert r.status_code == 503 and r.json()["engine_running"] is False         # test engine is not started
+        engine.state.update(running=True, last_tick=time.time())
+        r = client.get("/api/scheduler/health")
+        assert r.status_code == 200 and r.json()["healthy"] is True
+        engine.state.update(last_tick=time.time() - 600)
+        assert client.get("/api/scheduler/health").status_code == 503                # stalled engine
+        engine.state.update(running=False)
 
     def test_export_neutralises_spreadsheet_formulas(self, client, db, engine, hunts):
         evil = cand("evil-paypal.com", 70)

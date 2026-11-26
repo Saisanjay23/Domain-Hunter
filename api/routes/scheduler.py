@@ -17,6 +17,7 @@ from api.schemas import (
     BatchStatusRequest,
     DomainPatchRequest,
     DomainRunRequest,
+    FindingDismissRequest,
     FindingReviewRequest,
     ParseDomainsRequest,
     SchedulerSettingsRequest,
@@ -257,6 +258,34 @@ def api_review(domain_id: str, req: FindingReviewRequest, request: Request):
     return {"updated": n}
 
 
+@router.post("/api/scheduler/domains/{domain_id}/findings/dismiss", dependencies=WRITE)
+def api_dismiss(domain_id: str, req: FindingDismissRequest, request: Request):
+    d = db()
+    n = guarded(ss.set_dismissed, d, domain_id, req.ids, req.dismissed, req.reason)
+    ss.audit(d, actor(request), "findings.dismiss" if req.dismissed else "findings.restore", "domain", domain_id,
+             {"count": n, "reason": req.reason[:120]})
+    return {"updated": n}
+
+
+@router.get("/api/scheduler/health")
+def api_health(response: Response):
+    """For external monitoring: 200 while the engine is ticking, 503 when it should run but has stalled or is off."""
+    st = ENGINE.status()
+    now = time.time()
+    age = (now - st["last_tick"]) if st.get("last_tick") else None
+    try:
+        enabled = ss.get_settings(db())["enabled"]
+        active = db().batch_executions.count_documents({"status": {"$in": list(ss.EXEC_ACTIVE)}})
+        db_ok = True
+    except Exception:
+        enabled, active, db_ok = None, None, False
+    healthy = bool(db_ok and st.get("running") and enabled and age is not None and age < 120)
+    response.status_code = 200 if healthy else 503
+    return {"healthy": healthy, "engine_running": st.get("running"), "scheduling_enabled": enabled, "database": db_ok,
+            "last_tick_age_seconds": round(age, 1) if age is not None else None, "active_runs": active,
+            "last_error": st.get("last_error"), "owner": st.get("owner")}
+
+
 @router.get("/api/scheduler/domains/{domain_id}/jobs")
 def api_domain_jobs(domain_id: str, limit: int = Query(50, ge=1, le=200)):
     d = db()
@@ -273,7 +302,8 @@ def api_domain_obs(domain_id: str, limit: int = Query(200, ge=1, le=500), skip: 
 
 EXPORT_FIELDS = ["host", "classification", "lifecycle", "score", "verdict", "matched_keyword", "matching_technique",
                  "registered_domain", "dns_status", "a", "http_status", "final_url", "title", "sources", "first_seen",
-                 "last_seen", "original_domain", "domain_id", "last_job_id", "last_execution_id", "last_batch_id", "under_review"]
+                 "last_seen", "original_domain", "domain_id", "last_job_id", "last_execution_id", "last_batch_id", "under_review",
+                 "dismissed"]
 
 
 @router.get("/api/scheduler/domains/{domain_id}/export")
@@ -281,11 +311,22 @@ def api_export(domain_id: str, format: str = Query("csv", pattern="^(csv|json)$"
     d = db()
     dom = guarded(ss.get_domain, d, domain_id)
     query = guarded(ss.findings_query, dom["_id"], view)
+    return _export(d, query, format, f"findings-{dom['domain']}-{view}-{time.strftime('%Y%m%d-%H%M')}", {"domain": dom["domain"], "view": view})
+
+
+@router.get("/api/scheduler/batches/{batch_id}/export")
+def api_batch_export(batch_id: str, format: str = Query("csv", pattern="^(csv|json)$"), view: str = "all"):
+    d = db()
+    b = guarded(ss.get_batch, d, batch_id)
+    query = guarded(ss.batch_findings_query, d, b["_id"], view)
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in b["name"])[:60]
+    return _export(d, query, format, f"findings-batch-{safe}-{view}-{time.strftime('%Y%m%d-%H%M')}", {"batch": b["name"], "view": view})
+
+
+def _export(d, query, format: str, name: str, meta):
     rows = list(d.impersonation_findings.find(query, {"fingerprint": 0}).sort([("score", -1), ("host", 1)]).limit(50000))
-    stamp = time.strftime("%Y%m%d-%H%M")
-    name = f"findings-{dom['domain']}-{view}-{stamp}"
     if format == "json":
-        body = _json.dumps({"domain": dom["domain"], "view": view, "exported": time.time(),
+        body = _json.dumps({**meta, "exported": time.time(),
                             "findings": [{**{k: v for k, v in r.items() if k != "_id"}, "id": r["_id"]} for r in rows]}, default=str)
         return Response(body, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{name}.json"'})
     buf = io.StringIO()

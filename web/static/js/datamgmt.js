@@ -14,7 +14,13 @@ const DM_ACTIONS = {
   "batch": { title: "Delete batch", verb: "Delete batch" },
   "batch-executions": { title: "Clear run history", verb: "Clear run history" },
   "batch-remove": { title: "Remove domain from batch", verb: "Remove from batch" },
+  "reset": { title: "Reset all data", verb: "Back up and delete everything" },
 };
+const DM_LABEL = { hunts: "Saved hunts", candidates: "Hunt lookalikes", triage: "Case notes", watchlist: "Watched brands", alerts: "Alerts",
+  counters: "Id counters", organizations: "Organizations", monitored_domains: "Monitored domains", scan_batches: "Scan batches",
+  batch_domain_memberships: "Batch memberships", batch_executions: "Batch runs", scan_jobs: "Scan jobs", impersonation_findings: "Findings",
+  scan_observations: "Observations", scheduler_locks: "Locks", infra_investigations: "Investigations", audit_logs: "Audit entries",
+  migrations: "Old import records", _bih_healthcheck: "Health probes" };
 
 async function loadDataManagement() {
   const root = document.getElementById("dm-root");
@@ -54,11 +60,17 @@ function dmRender() {
       <div class="sch-head"><div><div class="sch-sub" style="margin:0">Everything below is stored in MongoDB. Deletions are scoped to one domain or batch, need its name typed back and are written to the audit log.</div></div>
         <div class="sch-actions">${dmBtn("refresh", "Refresh", {}, "btn btn-secondary btn-sm")}</div></div>
       <div class="sch-tiles">${tile(t.monitored_domains, "Monitored domains", "t-accent")}${tile(t.scan_batches, "Batches")}${tile(t.impersonation_findings, "Findings", "t-danger")}
-        ${tile(t.scan_observations, "Observations")}${tile(t.scan_jobs, "Scan jobs")}${tile(t.batch_executions, "Batch runs")}${tile(t.hunts, "Saved hunts")}${tile(t.audit_logs, "Audit entries")}</div>
+        ${tile(t.scan_observations, "Observations")}${tile(t.scan_jobs, "Scan jobs")}${tile(t.batch_executions, "Batch runs")}${tile(t.hunts, "Saved hunts")}
+        ${tile(t.infra_investigations, "Investigations")}${tile(t.alerts, "Alerts")}${tile(t.audit_logs, "Audit entries")}</div>
       <div class="sch-panel"><h3>Monitored domains</h3>${domRows ? `<div class="table-wrap"><table class="table sch-table"><thead><tr><th>Domain</th><th class="num">Batches</th><th class="num">Findings</th><th class="num">Observations</th><th class="num">Scans</th><th>Last scan</th><th></th></tr></thead><tbody>${domRows}</tbody></table></div>` : `<div class="hint">No monitored domains.</div>`}</div>
       <div class="sch-panel"><h3>Scan batches</h3>${batchRows ? `<div class="table-wrap"><table class="table sch-table"><thead><tr><th>Batch</th><th>Status</th><th class="num">Domains</th><th class="num">Runs</th><th class="num">Scan jobs</th><th></th></tr></thead><tbody>${batchRows}</tbody></table></div>` : `<div class="hint">No batches.</div>`}</div>
       <div class="sch-panel"><h3>Audit log <span class="hint" style="text-transform:none;letter-spacing:0">latest 60 changes</span></h3>${audit ? `<div class="dm-audit">${audit}</div>` : `<div class="hint">No changes recorded yet.</div>`}</div>
-      <div class="hint">Manual Brand Hunt history is managed on the History page; Infrastructure investigations are not stored per domain, so they are never removed here.</div>
+      <div class="sch-panel sch-danger"><h3>Reset all data</h3>
+        <div class="hint">Deletes every hunt, case note, watched brand, alert, scan batch, monitored domain, finding and saved infrastructure
+          investigation, so the application starts empty. A verified backup of everything is written to <code>data/backups/</code> first.
+          API keys, storage and scheduler settings are kept.</div>
+        <div class="row" style="margin-top:10px">${dmBtn("reset", "Reset all data…", {}, "btn btn-danger btn-sm")}</div></div>
+      <div class="hint">Single items: delete a saved hunt on the History page, an investigation on the Infrastructure page.</div>
     </div>`;
 }
 
@@ -71,17 +83,26 @@ async function dmOpen(op) {
   body.innerHTML = `<div class="hint">Checking what would be removed…</div>`;
   dlg.showModal();
   try {
-    const impactType = op.type.startsWith("batch") ? "batch" : "domain";
-    const imp = await settingsCall("GET", `/api/data/impact?type=${impactType}&id=${encodeURIComponent(op.id)}`);
+    let imp;
+    if (op.type === "reset") imp = await settingsCall("GET", "/api/data/reset");
+    else {
+      const impactType = op.type.startsWith("batch") ? "batch" : "domain";
+      imp = await settingsCall("GET", `/api/data/impact?type=${impactType}&id=${encodeURIComponent(op.id)}`);
+    }
     op.confirmText = imp.confirm_text;
     op.impact = imp;
     body.innerHTML = dmDialogHtml(op, imp);
     const inp = document.getElementById("dm-confirm-input");
-    inp.addEventListener("input", () => { document.getElementById("dm-go").disabled = inp.value.trim().toLowerCase() !== op.confirmText.toLowerCase(); });
+    inp.addEventListener("input", () => { document.getElementById("dm-go").disabled = !dmConfirmed(op, inp.value); });
     inp.focus();
   } catch (err) {
     body.innerHTML = `<div class="alert alert-danger">${I.alert}<div>${esc(err.message)}</div></div>`;
   }
+}
+
+function dmConfirmed(op, value) {
+  const v = (value || "").trim();
+  return op.type === "reset" ? v === op.confirmText : v.toLowerCase() === (op.confirmText || "").toLowerCase();
 }
 
 function dmDialogHtml(op, imp) {
@@ -105,11 +126,19 @@ function dmDialogHtml(op, imp) {
   } else if (op.type === "batch-executions") {
     what = `All run history of <b>${esc(imp.name)}</b>: executions, scan jobs and the reports they saved. Findings stay.`;
     grid = box(imp.executions, "Runs") + box(imp.scan_jobs, "Scan jobs");
+  } else if (op.type === "reset") {
+    const cols = Object.entries(imp.collections || {}).filter(([, n]) => n > 0);
+    what = `Every stored record in the <b>${esc(imp.database)}</b> database of this application (${schNum(imp.total)} documents). A verified backup is written to <code>data/backups/</code> first and can be restored with <code>python -m core.reset restore &lt;folder&gt;</code>.`;
+    grid = cols.map(([k, n]) => box(n, DM_LABEL[k] || k)).join("") || box(0, "Documents");
+    extra = `<div class="switches"><label class="switch"><input type="checkbox" id="dm-reset-audit"><span class="track"></span><span>Also delete the audit log</span></label>
+      <label class="switch"><input type="checkbox" id="dm-reset-sources" checked><span class="track"></span><span>Also clear the Source activity log</span></label></div>
+      <div class="hint">Kept: ${esc((imp.kept || []).join(", "))}. Other databases on the MongoDB server are never touched.</div>
+      ${imp.active_runs ? `<div class="alert alert-warning">${I.alert}<div>A scan batch is running. Cancel it on the Scan Scheduler page first.</div></div>` : ""}`;
   } else if (op.type === "batch-remove") {
     what = `Remove <b>${esc(op.label)}</b> from <b>${esc(imp.name)}</b>. The domain, its findings and its history are kept (it stays in other batches and in Data Management).`;
     grid = box(op.domainIds.length, "Domains");
   }
-  const busy = (imp.active_jobs || imp.active_executions) && !["batch-remove", "findings"].includes(op.type)
+  const busy = (imp.active_jobs || imp.active_executions) && !["batch-remove", "findings", "reset"].includes(op.type)
     ? `<div class="alert alert-warning">${I.alert}<div>A scan of this ${op.type.startsWith("batch") ? "batch" : "domain"} is queued or running. Cancel it first${op.type === "domain" ? " (or use the option below)" : ""}.</div></div>` : "";
   return `<div class="alert alert-danger">${I.alert}<div><strong>This cannot be undone.</strong><div>${what}</div></div></div>
     <div class="dm-impact">${grid}</div>${busy}${extra}
@@ -134,6 +163,8 @@ async function dmExecute(btn) {
       case "batch": return settingsCall("POST", `/api/data/batches/${id}/delete`, { confirm, delete_exclusive_domains: !!document.getElementById("dm-exclusive")?.checked });
       case "batch-executions": return settingsCall("POST", `/api/data/batches/${id}/executions/clear`, { confirm });
       case "batch-remove": return settingsCall("POST", `/api/data/batches/${id}/domains/remove`, { confirm, domain_ids: op.domainIds });
+      case "reset": return settingsCall("POST", "/api/data/reset", { confirm, include_audit: !!document.getElementById("dm-reset-audit")?.checked,
+        clear_source_log: !!document.getElementById("dm-reset-sources")?.checked });
     }
   };
   try {
@@ -146,6 +177,13 @@ async function dmExecute(btn) {
         throw e;
       }
     }
+    if (op.type === "reset") {
+      document.getElementById("dm-dialog-body").innerHTML = `<div class="alert alert-success">${I.check.replace('width="12" height="12"', 'width="16" height="16"')}<div>
+        <strong>All data deleted (${schNum(r.total)} documents${r.transaction ? ", in one transaction" : ""}).</strong>
+        <div class="hint">Backup: ${esc(r.backup.folder)} (${schNum(r.backup.total)} documents, verified)</div><div class="hint">Reloading the application…</div></div></div>`;
+      setTimeout(() => location.reload(), 2500);
+      return;
+    }
     const d = r.deleted || {};
     const summary = typeof r.removed === "number" ? `${r.removed} membership(s) removed` : Object.entries(d).filter(([, v]) => typeof v === "number").map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`).join(", ");
     showToast(`Done: ${summary || "nothing to delete"}`, 4200, "success");
@@ -157,7 +195,7 @@ async function dmExecute(btn) {
     else if (typeof schRefresh === "function") schRefresh();
   } catch (e) {
     err.innerHTML = `<div class="alert alert-danger">${I.alert}<div>${esc(e.message)}</div></div>`;
-  } finally { setBusy(btn, false); const inp = document.getElementById("dm-confirm-input"); if (btn.isConnected && inp) btn.disabled = inp.value.trim().toLowerCase() !== (op.confirmText || "").toLowerCase(); }
+  } finally { setBusy(btn, false); const inp = document.getElementById("dm-confirm-input"); if (btn.isConnected && inp) btn.disabled = !dmConfirmed(op, inp.value); }
 }
 
 document.addEventListener("click", e => {
@@ -171,6 +209,7 @@ document.addEventListener("click", e => {
     case "open-batch": return schGo("batch", { batchId: ds.id });
     case "findings": return dmOpen({ type: "findings", id: ds.id, all: true });
     case "domain-history": case "domain": case "batch": case "batch-executions": return dmOpen({ type: ds.dm, id: ds.id });
+    case "reset": return dmOpen({ type: "reset", id: "all" });
     case "execute": return dmExecute(btn);
   }
 });

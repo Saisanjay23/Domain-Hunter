@@ -139,3 +139,16 @@
   .infra-panel { top: auto; height: 46%; bottom: 44px; }
 }
 @media (prefers-reduced-motion: reduce) { .infra-progress .bar > span, .infra-panel { animation: none; } }
+
+/* ---------------------------------------------------------------- investigation history */
+.infra-history:empty { display: none; }
+.infra-history { display: grid; gap: 10px; padding-top: 6px; border-top: 1px solid var(--border); }
+.infra-hlist { display: grid; gap: 6px; }
+.infra-hrow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 9px 12px;
+  border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface-2); }
+.infra-hrow:hover { border-color: var(--accent-border); }
+.infra-hmain { display: grid; gap: 2px; min-width: 0; }
+.infra-hseed { justify-self: start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 0;
+  font-family: var(--font-mono); font-size: 13px; font-weight: 700; color: var(--text); cursor: pointer; }
+.infra-hseed:hover { color: var(--accent); }
+@media (max-width: 720px) { .infra-hrow { grid-template-columns: minmax(0, 1fr); } }

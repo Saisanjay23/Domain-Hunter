@@ -21,6 +21,7 @@ found for two monitored domains is two separate findings, and every read/delete 
 
 import hashlib
 import os
+from datetime import datetime, timezone
 import re
 import time
 import uuid
@@ -41,7 +42,8 @@ EXEC_FINAL = ("completed", "partially_completed", "failed", "cancelled", "interr
 JOB_FINAL = ("completed", "failed", "cancelled", "skipped")
 LIFECYCLE_LABELS = {"new": "New", "seen": "Previously Discovered", "updated": "Updated", "reappeared": "Reappeared",
                     "unreachable": "Currently Unreachable"}
-CLASS_KEYS = {"Confirmed Impersonation": "confirmed", "Potential Impersonation": "potential", "Benign/Unrelated": "benign"}
+CLASS_KEYS = {"Confirmed Impersonation": "confirmed", "Potential Impersonation": "potential", "Inactive / Historical": "inactive",
+              "Benign/Unrelated": "benign"}
 DEPTHS = ("quick", "standard", "deep")
 MISSED_POLICIES = ("run_once", "skip")
 MAX_BATCH_DOMAINS = 1000
@@ -57,8 +59,9 @@ SETTINGS_DEFAULTS = {
     "max_attempts": 3,
     "retry_base_seconds": 60,
     "lease_seconds": 120,
+    "observation_retention_days": 365,
 }
-SETTINGS_LIMITS = {"concurrency": (1, 6), "max_parallel_executions": (1, 4), "job_timeout": (60, 3600),
+SETTINGS_LIMITS = {"observation_retention_days": (7, 3650), "concurrency": (1, 6), "max_parallel_executions": (1, 4), "job_timeout": (60, 3600),
                    "max_attempts": (1, 5), "retry_base_seconds": (10, 3600), "lease_seconds": (60, 900)}
 
 
@@ -127,6 +130,7 @@ def ensure_indexes(db) -> None:
     db.scan_observations.create_index([("domain_id", ASCENDING), ("observed_at", DESCENDING)])
     db.scan_observations.create_index([("finding_id", ASCENDING), ("observed_at", DESCENDING)])
     db.scan_observations.create_index([("job_id", ASCENDING)])
+    apply_retention(db)
     db.audit_logs.create_index([("at", DESCENDING)])
     db.audit_logs.create_index([("target_type", ASCENDING), ("target_id", ASCENDING)])
 
@@ -157,7 +161,25 @@ def update_settings(db, values: Dict[str, Any]) -> Dict[str, Any]:
         clean[k] = n
     if clean:
         db.application_settings.update_one({"_id": "scheduler"}, {"$set": {**clean, "updated": time.time()}}, upsert=True)
+        if "observation_retention_days" in clean:
+            apply_retention(db, clean["observation_retention_days"])
     return get_settings(db)
+
+
+def apply_retention(db, days: Optional[int] = None) -> int:
+    """TTL index on scan_observations.observed_dt: MongoDB removes observations older than `days` on its own."""
+    days = int(days or get_settings(db)["observation_retention_days"])
+    seconds = days * 86400
+    info = db.scan_observations.index_information().get("observed_dt_ttl")
+    if info is None:
+        db.scan_observations.create_index([("observed_dt", ASCENDING)], name="observed_dt_ttl", expireAfterSeconds=seconds)
+    elif int(info.get("expireAfterSeconds", -1)) != seconds:
+        try:
+            db.command("collMod", "scan_observations", index={"name": "observed_dt_ttl", "expireAfterSeconds": seconds})
+        except Exception:  # servers / mocks without collMod: rebuild the index
+            db.scan_observations.drop_index("observed_dt_ttl")
+            db.scan_observations.create_index([("observed_dt", ASCENDING)], name="observed_dt_ttl", expireAfterSeconds=seconds)
+    return days
 
 
 def audit(db, actor: str, action: str, target_type: str, target_id: str, details: Optional[Dict[str, Any]] = None) -> str:
@@ -463,16 +485,7 @@ def batch_domains(db, batch_id: str) -> List[Dict[str, Any]]:
     if not ids:
         return []
     docs = {d["_id"]: d for d in db.monitored_domains.find({"_id": {"$in": ids}, "deleting": {"$ne": True}})}
-    counts: Dict[str, Dict[str, int]] = {i: {"total": 0, "confirmed": 0, "potential": 0, "new": 0} for i in ids}
-    for row in db.impersonation_findings.aggregate([
-            {"$match": {"domain_id": {"$in": ids}}},
-            {"$group": {"_id": {"d": "$domain_id", "c": "$classification", "l": "$lifecycle"}, "n": {"$sum": 1}}}]):
-        c = counts.setdefault(row["_id"]["d"], {"total": 0, "confirmed": 0, "potential": 0, "new": 0})
-        c["total"] += row["n"]
-        if row["_id"]["c"] in ("confirmed", "potential"):
-            c[row["_id"]["c"]] += row["n"]
-        if row["_id"]["l"] == "new":
-            c["new"] += row["n"]
+    counts = domain_stats(db, list(docs.values()))
     out = []
     for i in ids:
         d = docs.get(i)
@@ -611,18 +624,18 @@ def execution_jobs(db, execution_id: str) -> List[Dict[str, Any]]:
     return [job_public(j) for j in db.scan_jobs.find({"execution_id": check_id(execution_id, "ex")}).sort("created", ASCENDING)]
 
 
-def refresh_execution_totals(db, execution_id: str, now: Optional[float] = None) -> Dict[str, Any]:
+def refresh_execution_totals(db, execution_id: str, now: Optional[float] = None, session=None) -> Dict[str, Any]:
     counts = {s: 0 for s in ("queued", "running", "completed", "failed", "cancelled", "skipped")}
     new = upd = 0
     current = []
-    for j in db.scan_jobs.find({"execution_id": execution_id}, {"status": 1, "counts": 1, "domain": 1}):
+    for j in db.scan_jobs.find({"execution_id": execution_id}, {"status": 1, "counts": 1, "domain": 1}, session=session):
         counts[j["status"]] = counts.get(j["status"], 0) + 1
         new += int((j.get("counts") or {}).get("new", 0))
         upd += int((j.get("counts") or {}).get("updated", 0)) + int((j.get("counts") or {}).get("reappeared", 0))
         if j["status"] == "running":
             current.append(j["domain"])
     fields = {**counts, "new_findings": new, "updated_findings": upd, "current": current[:10], "heartbeat": now or time.time()}
-    db.batch_executions.update_one({"_id": execution_id}, {"$set": fields})
+    db.batch_executions.update_one({"_id": execution_id}, {"$set": fields}, session=session)
     return fields
 
 
@@ -707,11 +720,13 @@ def apply_scan_results(db, domain: Dict[str, Any], job: Dict[str, Any], candidat
     Benign/unrelated candidates are only stored when the host is already a finding (so a downgrade is visible).
     """
     now = now or time.time()
+    obs_dt = datetime.fromtimestamp(now, timezone.utc)
     did = domain["_id"]
     counts = {"candidates": len(candidates), "new": 0, "seen": 0, "updated": 0, "reappeared": 0, "unreachable": 0,
               "confirmed": 0, "potential": 0, "missed": 0}
     existing = {f["host"]: f for f in db.impersonation_findings.find(
-        {"domain_id": did}, {"host": 1, "fingerprint": 1, "lifecycle": 1, "missed_scans": 1, "first_seen": 1})}
+        {"domain_id": did}, {"host": 1, "fingerprint": 1, "lifecycle": 1, "missed_scans": 1, "first_seen": 1, "dismissed": 1,
+                             "classification": 1})}
     ops: List[Tuple[Dict[str, Any], Dict[str, Any], bool]] = []
     observations: List[Dict[str, Any]] = []
     seen_hosts = set()
@@ -721,8 +736,8 @@ def apply_scan_results(db, domain: Dict[str, Any], job: Dict[str, Any], candidat
             continue
         cls = CLASS_KEYS.get(c.get("classification") or "", "potential" if c.get("verdict") in ("phishing", "suspicious") else "benign")
         prev = existing.get(host)
-        if cls == "benign" and not prev:
-            continue
+        if cls in ("benign", "inactive") and not prev:
+            continue   # not stored unless already a finding (then the downgrade / takedown is visible as a change)
         seen_hosts.add(host)
         fp = _fingerprint(c, cls)
         if prev is None:
@@ -742,13 +757,20 @@ def apply_scan_results(db, domain: Dict[str, Any], job: Dict[str, Any], candidat
                   "keywords_used": list(job.get("keywords_used") or [])}
         if change in ("new", "updated", "reappeared"):
             fields["last_changed"] = now
-        ops.append(({"_id": f"{did}:{host}"}, {"$set": fields, "$setOnInsert": {
-            "domain_id": did, "host": host, "first_seen": now, "first_job_id": job["_id"], "first_execution_id": job.get("execution_id"),
-            "first_batch_id": job.get("batch_id"), "under_review": False}}, True))
-        observations.append({"_id": f"{job['_id']}:{host}", "finding_id": f"{did}:{host}", "domain_id": did, "host": host,
-                             "job_id": job["_id"], "execution_id": job.get("execution_id"), "batch_id": job.get("batch_id"),
-                             "observed_at": now, "change": change, "classification": cls, "score": fields["score"],
-                             "verdict": fields["verdict"], "dns_status": fields["dns_status"], "sources": fields["sources"]})
+        insert_only = {"domain_id": did, "host": host, "first_seen": now, "first_job_id": job["_id"],
+                       "first_execution_id": job.get("execution_id"), "first_batch_id": job.get("batch_id"), "under_review": False}
+        if prev is not None and prev.get("dismissed") and cls == "confirmed" and prev.get("classification") != "confirmed":
+            fields.update(dismissed=False, escalated_at=now)   # a dismissed lead that is now confirmed comes back
+            counts["escalated"] = counts.get("escalated", 0) + 1
+        elif prev is None:
+            insert_only["dismissed"] = False
+        ops.append(({"_id": f"{did}:{host}"}, {"$set": fields, "$setOnInsert": insert_only}, True))
+        if change != "seen":   # unchanged re-sightings only move last_seen on the finding: no history row per scan
+            observations.append({"_id": f"{job['_id']}:{host}", "finding_id": f"{did}:{host}", "domain_id": did, "host": host,
+                                 "job_id": job["_id"], "execution_id": job.get("execution_id"), "batch_id": job.get("batch_id"),
+                                 "observed_at": now, "observed_dt": obs_dt, "change": change, "classification": cls,
+                                 "score": fields["score"], "verdict": fields["verdict"], "dns_status": fields["dns_status"],
+                                 "sources": fields["sources"]})
 
     missing = [h for h in existing if h not in seen_hosts]
     counts["missed"] = len(missing)
@@ -770,7 +792,7 @@ def apply_scan_results(db, domain: Dict[str, Any], job: Dict[str, Any], candidat
                 counts["unreachable"] += 1
                 observations.append({"_id": f"{job['_id']}:{host}", "finding_id": f"{did}:{host}", "domain_id": did, "host": host,
                                      "job_id": job["_id"], "execution_id": job.get("execution_id"), "batch_id": job.get("batch_id"),
-                                     "observed_at": now, "change": "unreachable", "classification": None, "score": None,
+                                     "observed_at": now, "observed_dt": obs_dt, "change": "unreachable", "classification": None, "score": None,
                                      "verdict": None, "dns_status": "nxdomain", "sources": []})
             ops.append(({"_id": f"{did}:{host}", "domain_id": did}, {"$set": upd, "$inc": {"missed_scans": 1}}, False))
     _bulk_update(db.impersonation_findings, ops)
@@ -781,6 +803,7 @@ def apply_scan_results(db, domain: Dict[str, Any], job: Dict[str, Any], candidat
             except Exception:  # a retried job re-inserting the same observation ids: keep the first copy
                 for o in observations[i:i + 500]:
                     db.scan_observations.replace_one({"_id": o["_id"]}, o, upsert=True)
+    refresh_domain_stats(db, did)
     return counts
 
 
@@ -797,7 +820,7 @@ def _bulk_update(coll, ops: List[Tuple[Dict[str, Any], Dict[str, Any], bool]]) -
 
 FINDING_SORTS = {"score": [("score", DESCENDING), ("host", ASCENDING)], "last_seen": [("last_seen", DESCENDING)],
                  "first_seen": [("first_seen", DESCENDING)], "host": [("host", ASCENDING)]}
-FINDING_VIEWS = ("all", "new", "confirmed", "potential", "benign", "changed", "unreachable", "review")
+FINDING_VIEWS = ("all", "new", "confirmed", "potential", "inactive", "benign", "changed", "unreachable", "review", "dismissed")
 
 
 def findings_query(domain_id: str, view: str = "all", q: str = "", min_score: Optional[int] = None) -> Dict[str, Any]:
@@ -806,7 +829,7 @@ def findings_query(domain_id: str, view: str = "all", q: str = "", min_score: Op
         raise DataError(f"view must be one of {', '.join(FINDING_VIEWS)}")
     if view == "new":
         query["lifecycle"] = "new"
-    elif view in ("confirmed", "potential", "benign"):
+    elif view in ("confirmed", "potential", "inactive", "benign"):
         query["classification"] = view
     elif view == "changed":
         query["lifecycle"] = {"$in": ["updated", "reappeared"]}
@@ -814,6 +837,10 @@ def findings_query(domain_id: str, view: str = "all", q: str = "", min_score: Op
         query["lifecycle"] = "unreachable"
     elif view == "review":
         query["under_review"] = True
+    if view == "dismissed":
+        query["dismissed"] = True
+    else:
+        query["dismissed"] = {"$ne": True}
     q = (q or "").strip().lower()[:100]
     if q:
         query["host"] = {"$regex": re.escape(q)}
@@ -839,13 +866,15 @@ def list_findings(db, domain_id: str, view: str = "all", q: str = "", sort: str 
     return {"items": items, "total": total, "page": page, "page_size": page_size, "pages": max(1, -(-total // page_size))}
 
 
-def findings_counts(db, domain_ids: List[str]) -> Dict[str, int]:
-    out = {"total": 0, "confirmed": 0, "potential": 0, "benign": 0, "new": 0, "updated": 0, "reappeared": 0, "unreachable": 0}
-    if not domain_ids:
-        return out
-    for row in db.impersonation_findings.aggregate([
-            {"$match": {"domain_id": {"$in": list(domain_ids)}}},
-            {"$group": {"_id": {"c": "$classification", "l": "$lifecycle"}, "n": {"$sum": 1}}}]):
+STAT_KEYS = ("total", "confirmed", "potential", "inactive", "benign", "new", "updated", "reappeared", "unreachable", "dismissed", "observations")
+
+
+def _count_findings(db, match: Dict[str, Any], session=None) -> Dict[str, int]:
+    out = {k: 0 for k in STAT_KEYS}
+    out["dismissed"] = db.impersonation_findings.count_documents({**match, "dismissed": True}, session=session)
+    for row in db.impersonation_findings.aggregate([{"$match": {**match, "dismissed": {"$ne": True}}},
+                                                     {"$group": {"_id": {"c": "$classification", "l": "$lifecycle"}, "n": {"$sum": 1}}}],
+                                                    session=session):
         n = row["n"]
         out["total"] += n
         c, lc = row["_id"].get("c"), row["_id"].get("l")
@@ -856,12 +885,76 @@ def findings_counts(db, domain_ids: List[str]) -> Dict[str, int]:
     return out
 
 
+def refresh_domain_stats(db, domain_id: str, session=None) -> Dict[str, int]:
+    """Recomputes one domain's counters (indexed: only that domain's documents are read) and stores them on the
+    monitored domain, so overview / batch / data pages sum a few hundred small documents instead of every finding.
+    Called after every scan and every change to findings (dismiss, delete, clear)."""
+    stats = _count_findings(db, {"domain_id": domain_id}, session)
+    stats["observations"] = db.scan_observations.count_documents({"domain_id": domain_id}, session=session)
+    stats["updated_at"] = time.time()
+    db.monitored_domains.update_one({"_id": domain_id}, {"$set": {"stats": stats}}, session=session)
+    return stats
+
+
+def domain_stats(db, docs: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
+    """Counters per domain document (computed and stored once for domains that have none yet)."""
+    out = {}
+    for d in docs:
+        st = d.get("stats")
+        if not st or any(k not in st for k in STAT_KEYS):
+            st = refresh_domain_stats(db, d["_id"])
+        out[d["_id"]] = {k: int(st.get(k, 0)) for k in STAT_KEYS}
+    return out
+
+
+def findings_counts(db, domain_ids: List[str]) -> Dict[str, int]:
+    """Totals over domains, from the per-domain counters (O(domains), not O(findings))."""
+    out = {k: 0 for k in STAT_KEYS if k != "observations"}
+    if not domain_ids:
+        return out
+    docs = list(db.monitored_domains.find({"_id": {"$in": list(domain_ids)}}, {"stats": 1}))
+    for st in domain_stats(db, docs).values():
+        for k in out:
+            out[k] += st[k]
+    return out
+
+
+def _findings_counts_live(db, domain_ids: List[str]) -> Dict[str, int]:
+    """Exact aggregate over the findings themselves (tests use it to prove the counters are right)."""
+    out = _count_findings(db, {"domain_id": {"$in": list(domain_ids)}})
+    out.pop("observations", None)
+    return out
+
+
 def set_review(db, domain_id: str, finding_ids: List[str], under_review: bool) -> int:
     did = check_id(domain_id, "md")
     ids = [f for f in finding_ids if isinstance(f, str) and f.startswith(did + ":")]
     if not ids:
         return 0
     return db.impersonation_findings.update_many({"domain_id": did, "_id": {"$in": ids}}, {"$set": {"under_review": bool(under_review)}}).modified_count
+
+
+def set_dismissed(db, domain_id: str, finding_ids: List[str], dismissed: bool, reason: str = "") -> int:
+    """False-positive dismissal: hidden from the review views, counts and alerts, kept across rescans."""
+    did = check_id(domain_id, "md")
+    ids = [f for f in finding_ids if isinstance(f, str) and f.startswith(did + ":")]
+    if not ids:
+        return 0
+    upd: Dict[str, Any] = {"dismissed": bool(dismissed)}
+    if dismissed:
+        upd.update(dismissed_at=time.time(), dismissed_reason=_clean_text(reason, 300))
+    n = db.impersonation_findings.update_many({"domain_id": did, "_id": {"$in": ids}}, {"$set": upd}).modified_count
+    refresh_domain_stats(db, did)
+    return n
+
+
+def batch_findings_query(db, batch_id: str, view: str = "all") -> Dict[str, Any]:
+    """Findings of every domain in a batch (for the batch-wide export)."""
+    b = get_batch(db, batch_id)
+    ids = batch_domain_ids(db, b["_id"])
+    q = findings_query("md_000000000000", view)          # same view rules as one domain...
+    q["domain_id"] = {"$in": ids}                         # ...applied to all of the batch's domains
+    return q
 
 
 def finding_history(db, domain_id: str, finding_id: str, limit: int = 100) -> List[Dict[str, Any]]:
@@ -945,135 +1038,198 @@ def require_confirmation(expected: str, given: Optional[str]) -> None:
         raise DataError(f"Type '{expected}' exactly to confirm")
 
 
-def _delete_hunts(db, hunt_ids: List[str]) -> int:
+# ---------------------------------------------------------------------- transactions
+_TXN_SUPPORT: Dict[int, bool] = {}
+
+
+def supports_transactions(db) -> bool:
+    """True on a replica set or sharded cluster (multi-document transactions); False on a standalone server."""
+    key = id(db.client)
+    if key not in _TXN_SUPPORT:
+        try:
+            hello = db.client.admin.command("hello")
+            _TXN_SUPPORT[key] = bool(hello.get("setName") or hello.get("msg") == "isdbgrid") \
+                and hello.get("logicalSessionTimeoutMinutes") is not None
+        except Exception:  # mongomock, old servers, restricted users
+            _TXN_SUPPORT[key] = False
+    return _TXN_SUPPORT[key]
+
+
+def run_atomic(db, fn):
+    """
+    Runs fn(session) as ONE multi-document transaction when the server supports it: either everything is deleted
+    or nothing is. On a standalone server fn(None) runs the recoverable workflow instead (the target is marked
+    `deleting` first and its own document is removed last, every step is scoped and idempotent, so repeating an
+    interrupted call finishes it). Returns (result, transactional).
+    """
+    if supports_transactions(db):
+        with db.client.start_session() as session:
+            # with_transaction retries the whole callback on transient errors: every step below is idempotent
+            return session.with_transaction(lambda s: fn(s)), True
+    return fn(None), False
+
+
+def _delete_hunts(db, hunt_ids: List[str], session=None) -> int:
+    """Saved hunts created by the scheduler only (`scheduled_batch`), never manual Brand Hunt history."""
     hunt_ids = [h for h in hunt_ids if h]
     if not hunt_ids:
         return 0
-    n = db.hunts.delete_many({"_id": {"$in": hunt_ids}, "scheduled_batch": True}).deleted_count
-    db.candidates.delete_many({"hunt_id": {"$in": hunt_ids}})
+    owned = [h["_id"] for h in db.hunts.find({"_id": {"$in": hunt_ids}, "scheduled_batch": True}, {"_id": 1}, session=session)]
+    if not owned:
+        return 0
+    n = db.hunts.delete_many({"_id": {"$in": owned}}, session=session).deleted_count
+    db.candidates.delete_many({"hunt_id": {"$in": owned}}, session=session)
     return n
 
 
-def delete_findings(db, domain_id: str, finding_ids: Optional[List[str]] = None) -> Dict[str, int]:
+def delete_findings(db, domain_id: str, finding_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """Selected findings (ids must belong to the domain) or all findings of the domain, plus their observations."""
-    d = get_domain(db, domain_id)
-    did = d["_id"]
-    q: Dict[str, Any] = {"domain_id": did}
-    if finding_ids is not None:
-        ids = [f for f in finding_ids if isinstance(f, str) and f.startswith(did + ":")]
-        if not ids:
-            return {"findings": 0, "observations": 0}
-        q["_id"] = {"$in": ids}
-        obs = db.scan_observations.delete_many({"domain_id": did, "finding_id": {"$in": ids}}).deleted_count
-    else:
-        obs = db.scan_observations.delete_many({"domain_id": did}).deleted_count
-    return {"findings": db.impersonation_findings.delete_many(q).deleted_count, "observations": obs}
+    did = get_domain(db, domain_id)["_id"]
+    ids = None if finding_ids is None else [f for f in finding_ids if isinstance(f, str) and f.startswith(did + ":")]
+    if ids is not None and not ids:
+        return {"findings": 0, "observations": 0, "transaction": False}
+
+    def work(s):
+        if ids is None:
+            obs = db.scan_observations.delete_many({"domain_id": did}, session=s).deleted_count
+            return {"findings": db.impersonation_findings.delete_many({"domain_id": did}, session=s).deleted_count, "observations": obs}
+        obs = db.scan_observations.delete_many({"domain_id": did, "finding_id": {"$in": ids}}, session=s).deleted_count
+        return {"findings": db.impersonation_findings.delete_many({"domain_id": did, "_id": {"$in": ids}}, session=s).deleted_count,
+                "observations": obs}
+    out, txn = run_atomic(db, work)
+    refresh_domain_stats(db, did)
+    return {**out, "transaction": txn}
 
 
-def clear_domain_history(db, domain_id: str) -> Dict[str, int]:
+def clear_domain_history(db, domain_id: str) -> Dict[str, Any]:
     """Scan history (finished jobs, their saved hunts, observations). Current findings are kept."""
-    d = get_domain(db, domain_id)
-    did = d["_id"]
-    if db.scan_jobs.find_one({"domain_id": did, "status": {"$in": ["queued", "running"]}}, {"_id": 1}):
-        raise Conflict("A scan of this domain is queued or running. Cancel it first.")
-    jobs = list(db.scan_jobs.find({"domain_id": did, "status": {"$in": list(JOB_FINAL)}}, {"hunt_id": 1}))
-    hunts = _delete_hunts(db, [j.get("hunt_id") for j in jobs])
-    obs = db.scan_observations.delete_many({"domain_id": did}).deleted_count
-    n = db.scan_jobs.delete_many({"domain_id": did, "_id": {"$in": [j["_id"] for j in jobs]}}).deleted_count if jobs else 0
-    return {"scan_jobs": n, "observations": obs, "saved_hunts": hunts}
+    did = get_domain(db, domain_id)["_id"]
+
+    def work(s):
+        if db.scan_jobs.find_one({"domain_id": did, "status": {"$in": ["queued", "running"]}}, {"_id": 1}, session=s):
+            raise Conflict("A scan of this domain is queued or running. Cancel it first.")
+        jobs = list(db.scan_jobs.find({"domain_id": did, "status": {"$in": list(JOB_FINAL)}}, {"hunt_id": 1}, session=s))
+        hunts = _delete_hunts(db, [j.get("hunt_id") for j in jobs], s)
+        obs = db.scan_observations.delete_many({"domain_id": did}, session=s).deleted_count
+        n = db.scan_jobs.delete_many({"domain_id": did, "_id": {"$in": [j["_id"] for j in jobs]}}, session=s).deleted_count if jobs else 0
+        return {"scan_jobs": n, "observations": obs, "saved_hunts": hunts}
+    out, txn = run_atomic(db, work)
+    refresh_domain_stats(db, did)
+    return {**out, "transaction": txn}
 
 
-def delete_domain(db, domain_id: str) -> Dict[str, int]:
-    """
-    Recoverable, idempotent delete (standalone MongoDB has no multi-document transactions):
-    1. mark the domain `deleting` (the scheduler and UI stop using it), 2. remove its scoped data collection by
-    collection, 3. remove the domain document last. If the process stops half-way, repeating the call finishes it.
-    """
-    did = check_id(domain_id, "md")
-    d = db.monitored_domains.find_one({"_id": did})
-    if not d:
-        raise NotFound("Monitored domain not found")
-    if db.scan_jobs.find_one({"domain_id": did, "status": "running"}, {"_id": 1}):
+def _delete_domain_work(db, did: str, s) -> Dict[str, Any]:
+    if db.scan_jobs.find_one({"domain_id": did, "status": "running"}, {"_id": 1}, session=s):
         raise Conflict("A scan of this domain is running. Cancel it first.")
-    db.monitored_domains.update_one({"_id": did}, {"$set": {"deleting": True}})
-    db.scan_jobs.update_many({"domain_id": did, "status": "queued"}, {"$set": {"status": "cancelled", "error": "domain deleted", "finished": time.time()}})
-    jobs = list(db.scan_jobs.find({"domain_id": did}, {"hunt_id": 1, "execution_id": 1}))
-    out = {"findings": db.impersonation_findings.delete_many({"domain_id": did}).deleted_count,
-           "observations": db.scan_observations.delete_many({"domain_id": did}).deleted_count,
-           "saved_hunts": _delete_hunts(db, [j.get("hunt_id") for j in jobs]),
-           "scan_jobs": db.scan_jobs.delete_many({"domain_id": did}).deleted_count,
-           "memberships": db.batch_domain_memberships.delete_many({"domain_id": did}).deleted_count}
+    db.monitored_domains.update_one({"_id": did}, {"$set": {"deleting": True, "deleting_since": time.time()}}, session=s)
+    db.scan_jobs.update_many({"domain_id": did, "status": "queued"},
+                             {"$set": {"status": "cancelled", "error": "domain deleted", "finished": time.time()}}, session=s)
+    jobs = list(db.scan_jobs.find({"domain_id": did}, {"hunt_id": 1, "execution_id": 1}, session=s))
+    out = {"findings": db.impersonation_findings.delete_many({"domain_id": did}, session=s).deleted_count,
+           "observations": db.scan_observations.delete_many({"domain_id": did}, session=s).deleted_count,
+           "saved_hunts": _delete_hunts(db, [j.get("hunt_id") for j in jobs], s),
+           "scan_jobs": db.scan_jobs.delete_many({"domain_id": did}, session=s).deleted_count,
+           "memberships": db.batch_domain_memberships.delete_many({"domain_id": did}, session=s).deleted_count}
     for ex in {j.get("execution_id") for j in jobs if j.get("execution_id")}:
-        refresh_execution_totals(db, ex)
-    db.scheduler_locks.delete_many({"_id": f"domain:{did}"})
-    out["domain_record"] = db.monitored_domains.delete_one({"_id": did}).deleted_count
+        refresh_execution_totals(db, ex, session=s)
+    db.scheduler_locks.delete_many({"_id": f"domain:{did}"}, session=s)
+    out["domain_record"] = db.monitored_domains.delete_one({"_id": did}, session=s).deleted_count
     return out
 
 
-def clear_batch_executions(db, batch_id: str) -> Dict[str, int]:
-    b = get_batch(db, batch_id)
-    if db.batch_executions.find_one({"batch_id": b["_id"], "status": {"$in": list(EXEC_ACTIVE)}}, {"_id": 1}):
-        raise Conflict("This batch has a run in progress. Cancel it first.")
-    exs = [e["_id"] for e in db.batch_executions.find({"batch_id": b["_id"]}, {"_id": 1})]
-    jobs = list(db.scan_jobs.find({"batch_id": b["_id"], "execution_id": {"$in": exs}}, {"hunt_id": 1})) if exs else []
-    out = {"executions": 0, "scan_jobs": 0, "saved_hunts": 0}
-    if exs:
-        out["saved_hunts"] = _delete_hunts(db, [j.get("hunt_id") for j in jobs])
-        out["scan_jobs"] = db.scan_jobs.delete_many({"batch_id": b["_id"], "execution_id": {"$in": exs}}).deleted_count
-        out["executions"] = db.batch_executions.delete_many({"batch_id": b["_id"], "_id": {"$in": exs}}).deleted_count
-    db.scan_batches.update_one({"_id": b["_id"]}, {"$set": {"last_status": None, "last_execution_id": None}})
-    return out
+def delete_domain(db, domain_id: str) -> Dict[str, Any]:
+    """The monitored domain and everything it owns (findings, observations, jobs, scheduler-saved hunts, memberships)."""
+    did = check_id(domain_id, "md")
+    if not db.monitored_domains.find_one({"_id": did}, {"_id": 1}):
+        raise NotFound("Monitored domain not found")
+    out, txn = run_atomic(db, lambda s: _delete_domain_work(db, did, s))
+    return {**out, "transaction": txn}
+
+
+def _clear_executions_work(db, bid: str, s) -> Dict[str, int]:
+    exs = [e["_id"] for e in db.batch_executions.find({"batch_id": bid}, {"_id": 1}, session=s)]
+    jobs = list(db.scan_jobs.find({"batch_id": bid}, {"hunt_id": 1}, session=s))
+    return {"saved_hunts": _delete_hunts(db, [j.get("hunt_id") for j in jobs], s),
+            "scan_jobs": db.scan_jobs.delete_many({"batch_id": bid}, session=s).deleted_count,
+            "executions": db.batch_executions.delete_many({"batch_id": bid, "_id": {"$in": exs}}, session=s).deleted_count if exs else 0}
+
+
+def clear_batch_executions(db, batch_id: str) -> Dict[str, Any]:
+    bid = get_batch(db, batch_id)["_id"]
+
+    def work(s):
+        if db.batch_executions.find_one({"batch_id": bid, "status": {"$in": list(EXEC_ACTIVE)}}, {"_id": 1}, session=s):
+            raise Conflict("This batch has a run in progress. Cancel it first.")
+        out = _clear_executions_work(db, bid, s)
+        db.scan_batches.update_one({"_id": bid}, {"$set": {"last_status": None, "last_execution_id": None}}, session=s)
+        return out
+    out, txn = run_atomic(db, work)
+    return {**out, "transaction": txn}
 
 
 def delete_batch(db, batch_id: str, delete_exclusive_domains: bool = False) -> Dict[str, Any]:
     """Deletes the batch configuration, its memberships and run history. Domains stay unless they belong to no other
-    batch AND delete_exclusive_domains is set (then each is deleted with delete_domain)."""
+    batch AND delete_exclusive_domains is set (then they are deleted with everything they own, in the same transaction)."""
     bid = check_id(batch_id, "bt")
-    b = db.scan_batches.find_one({"_id": bid})
-    if not b:
+    if not db.scan_batches.find_one({"_id": bid}, {"_id": 1}):
         raise NotFound("Batch not found")
-    if db.batch_executions.find_one({"batch_id": bid, "status": {"$in": list(EXEC_ACTIVE)}}, {"_id": 1}):
-        raise Conflict("This batch has a run in progress. Cancel it first.")
-    db.scan_batches.update_one({"_id": bid}, {"$set": {"deleting": True, "status": "disabled", "next_run_at": None}})
-    ids = batch_domain_ids(db, bid)
-    exclusive = [i for i in ids if db.batch_domain_memberships.count_documents({"domain_id": i}) == 1]
-    out: Dict[str, Any] = clear_batch_executions_unchecked(db, bid)
-    out["memberships"] = db.batch_domain_memberships.delete_many({"batch_id": bid}).deleted_count
-    out["domains_deleted"] = []
-    if delete_exclusive_domains:
-        for i in exclusive:
-            if not db.batch_domain_memberships.find_one({"domain_id": i}, {"_id": 1}):
-                try:
-                    r = delete_domain(db, i)
-                    out["domains_deleted"].append({"id": i, **r})
-                except (NotFound, Conflict):
-                    continue
-    out["batch_record"] = db.scan_batches.delete_one({"_id": bid}).deleted_count
-    return out
+
+    def work(s):
+        if db.batch_executions.find_one({"batch_id": bid, "status": {"$in": list(EXEC_ACTIVE)}}, {"_id": 1}, session=s):
+            raise Conflict("This batch has a run in progress. Cancel it first.")
+        db.scan_batches.update_one({"_id": bid}, {"$set": {"deleting": True, "deleting_since": time.time(), "status": "disabled",
+                                                          "next_run_at": None}}, session=s)
+        ids = [m["domain_id"] for m in db.batch_domain_memberships.find({"batch_id": bid}, {"domain_id": 1}, session=s)]
+        exclusive = [i for i in ids if db.batch_domain_memberships.count_documents({"domain_id": i}, session=s) == 1]
+        out: Dict[str, Any] = _clear_executions_work(db, bid, s)
+        out["memberships"] = db.batch_domain_memberships.delete_many({"batch_id": bid}, session=s).deleted_count
+        out["domains_deleted"] = []
+        if delete_exclusive_domains:
+            for i in exclusive:
+                if db.monitored_domains.find_one({"_id": i}, {"_id": 1}, session=s):
+                    out["domains_deleted"].append({"id": i, **_delete_domain_work(db, i, s)})
+        out["batch_record"] = db.scan_batches.delete_one({"_id": bid}, session=s).deleted_count
+        return out
+    out, txn = run_atomic(db, work)
+    return {**out, "transaction": txn}
 
 
-def clear_batch_executions_unchecked(db, bid: str) -> Dict[str, int]:
-    exs = [e["_id"] for e in db.batch_executions.find({"batch_id": bid}, {"_id": 1})]
-    jobs = list(db.scan_jobs.find({"batch_id": bid}, {"hunt_id": 1}))
-    return {"saved_hunts": _delete_hunts(db, [j.get("hunt_id") for j in jobs]),
-            "scan_jobs": db.scan_jobs.delete_many({"batch_id": bid}).deleted_count,
-            "executions": db.batch_executions.delete_many({"batch_id": bid, "_id": {"$in": exs}}).deleted_count if exs else 0}
+def finish_interrupted_deletes(db, older_than: float = 60.0, now: Optional[float] = None) -> List[str]:
+    """Standalone servers only: a delete that stopped half-way left its target marked `deleting` (hidden from the
+    UI and the scheduler). Repeating the idempotent delete finishes it; the engine calls this on every tick."""
+    cutoff = (now or time.time()) - older_than
+    done = []
+    for d in list(db.monitored_domains.find({"deleting": True, "deleting_since": {"$lt": cutoff}}, {"_id": 1})):
+        try:
+            delete_domain(db, d["_id"])
+            done.append(d["_id"])
+        except (NotFound, Conflict):
+            continue
+    for b in list(db.scan_batches.find({"deleting": True, "deleting_since": {"$lt": cutoff}}, {"_id": 1})):
+        try:
+            delete_batch(db, b["_id"])
+            done.append(b["_id"])
+        except (NotFound, Conflict):
+            continue
+    return done
 
 
 def data_summary(db) -> Dict[str, Any]:
     """Per-domain and per-batch volumes for the Data Management page (aggregates, no per-row counting loops)."""
     def grouped(coll, key="domain_id"):
         return {r["_id"]: r["n"] for r in db[coll].aggregate([{"$group": {"_id": f"${key}", "n": {"$sum": 1}}}])}
-    f, o, j = grouped("impersonation_findings"), grouped("scan_observations"), grouped("scan_jobs")
-    mem = grouped("batch_domain_memberships")
+    j, mem = grouped("scan_jobs"), grouped("batch_domain_memberships")
+    docs = list(db.monitored_domains.find({"deleting": {"$ne": True}}).sort("domain", ASCENDING))
+    st = domain_stats(db, docs)
     domains = [{"id": d["_id"], "domain": d["domain"], "organization": d.get("organization") or "", "status": d.get("status"),
-                "findings": f.get(d["_id"], 0), "observations": o.get(d["_id"], 0), "scan_jobs": j.get(d["_id"], 0),
-                "batches": mem.get(d["_id"], 0), "last_scan_at": d.get("last_scan_at")}
-               for d in db.monitored_domains.find({"deleting": {"$ne": True}}).sort("domain", ASCENDING)]
+                "findings": st[d["_id"]]["total"] + st[d["_id"]]["dismissed"], "observations": st[d["_id"]]["observations"],
+                "scan_jobs": j.get(d["_id"], 0), "batches": mem.get(d["_id"], 0), "last_scan_at": d.get("last_scan_at")}
+               for d in docs]
     ex, bj, bm = grouped("batch_executions", "batch_id"), grouped("scan_jobs", "batch_id"), grouped("batch_domain_memberships", "batch_id")
     batches = [{"id": b["_id"], "name": b["name"], "status": b.get("status"), "domains": bm.get(b["_id"], 0),
                 "executions": ex.get(b["_id"], 0), "scan_jobs": bj.get(b["_id"], 0)}
                for b in db.scan_batches.find({"deleting": {"$ne": True}}).sort("name_key", ASCENDING)]
     totals = {c: db[c].estimated_document_count() for c in ("monitored_domains", "scan_batches", "batch_executions", "scan_jobs",
-                                                             "impersonation_findings", "scan_observations", "audit_logs", "hunts", "candidates")}
+                                                             "impersonation_findings", "scan_observations", "audit_logs", "hunts", "candidates",
+                                                             "infra_investigations", "alerts", "triage", "watchlist")}
     return {"domains": domains, "batches": batches, "totals": totals}

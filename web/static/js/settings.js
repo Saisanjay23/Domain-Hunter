@@ -40,7 +40,8 @@ function renderStorage() {
   let where;
   if (st.connected) {
     where = kvRows([["Hosts", (st.uri.hosts || []).join(", ")], ["Database", st.uri.database], ["Credentials", st.uri.has_credentials ? "in connection string (hidden)" : "none"],
-    ["Connection", st.uri.srv ? "mongodb+srv (Atlas / DNS seed list)" : "mongodb://"], ["Driver", st.driver]]);
+    ["Connection", st.uri.srv ? "mongodb+srv (Atlas / DNS seed list)" : "mongodb://"], ["Driver", st.driver],
+    ["Transactions", st.transactions ? "Supported: deletes are all-or-nothing" : "Standalone server: deletes use the recoverable workflow (enable a replica set for transactions)"]]);
   } else {
     where = `<div class="alert alert-danger">${I.alert}<div><strong>${esc(st.error || "Cannot connect")}</strong><div class="hint" style="margin-top: 4px;">Hunts still run but are not saved until MongoDB connects again.</div></div></div>`;
   }
@@ -60,22 +61,6 @@ function renderStorage() {
   document.getElementById("mongo-uri").placeholder = mongoConfigured
     ? `Saved (${(st.uri.hosts || []).join(", ")}). Enter a new connection string to replace it` : "mongodb://127.0.0.1:27017";
   document.getElementById("mongo-db").placeholder = mongoConfigured ? st.uri.database : "brand_hunter";
-
-  const mig = document.getElementById("storage-migrate-card");
-  const legacy = st.legacy || [];
-  const runs = st.migrations || [];
-  mig.hidden = !st.connected || (!legacy.length && !runs.length);
-  if (!mig.hidden) {
-    const files = legacy.map(f => {
-      const c = f.counts || {};
-      return f.error ? `${f.path}: unreadable (${f.error})` : `${f.path}: ${c.hunts ?? 0} hunts, ${c.triage ?? 0} case notes, ${c.watchlist ?? 0} watched brands, ${c.alerts ?? 0} alerts`;
-    });
-    const last = runs[0];
-    document.getElementById("storage-migrate-info").innerText = (files.length
-      ? `Legacy SQLite history found. Import makes a backup copy first, copies every record (safe to repeat) and checks the counts. The file itself is never changed or deleted.\n${files.join("\n")}`
-      : "No legacy SQLite file is present.") + (last ? `\nLast import: ${new Date(last.finished * 1000).toLocaleString()} · validation ${last.validation && last.validation.ok ? "passed" : "FAILED"} · backup ${last.backup ? last.backup.path : "n/a"}` : "");
-    document.getElementById("btn-migrate-up").disabled = !legacy.length;
-  }
 }
 
 async function testStorage(btn) {
@@ -119,22 +104,6 @@ async function clearStorage() {
     historyData = [];
     loadSources();
   } catch (err) { setStorageResult(false, err.message); }
-}
-
-async function migrateStorage(direction, btn) {
-  if (!window.confirm("Import the legacy SQLite history into MongoDB? A backup copy is made first; the original file is kept.")) return;
-  setBusy(btn, true, "Importing…");
-  const out = document.getElementById("storage-migrate-result");
-  out.innerHTML = "";
-  try {
-    const r = await settingsCall("POST", "/api/storage/migrate", { direction });
-    const c = r.copied;
-    const backups = (r.reports || []).map(x => x.backup && x.backup.path).filter(Boolean).join(", ");
-    out.innerHTML = `<div class="alert ${r.ok ? "alert-success" : "alert-danger"}">${r.ok ? I.check.replace('width="12" height="12"', 'width="16" height="16"') : I.alert}<div>${r.ok ? "Import validated." : "Import finished but validation found missing records."} Copied ${plural(c.hunts, "hunt")}, ${plural(c.triage, "case note")}, ${plural(c.watchlist, "watched brand")}, ${plural(c.alerts, "alert")} (${c.watchlist_skipped + c.alerts_skipped} already present).<div class="hint">Backup: ${esc(backups)}</div></div></div>`;
-    storageData = r.status;
-    renderStorage();
-  } catch (err) { out.innerHTML = `<div class="alert alert-danger">${I.alert}<div>${esc(err.message)}</div></div>`; }
-  finally { setBusy(btn, false); }
 }
 
 async function loadStorageBadge() {

@@ -58,6 +58,7 @@
 .cls-confirmed { color: var(--danger); background: var(--danger-bg); border-color: var(--danger-border); }
 .cls-potential { color: var(--warning); background: var(--warning-bg); border-color: var(--warning-border); }
 .cls-benign { color: var(--success); background: var(--success-bg); border-color: var(--success-border); }
+.cls-inactive { color: var(--text-3); background: var(--surface-2); border-style: dashed; }
 
 /* ------------------------------------------------------------------ batch cards */
 .sch-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }

@@ -17,7 +17,7 @@ const SCH_STATUS_LABEL = {
   scheduled: "Scheduled", manual: "Manual", ok: "OK", retry: "Retrying", waiting: "Waiting",
 };
 const SCH_TRIGGER = { schedule: "Scheduled", manual: "Run now", manual_domain: "Domain run", retry: "Retry" };
-const SCH_TABS = [["new", "New Discoveries"], ["all", "All Results"], ["confirmed", "Confirmed"], ["potential", "Potential"],
+const SCH_TABS = [["new", "New Discoveries"], ["all", "All Results"], ["confirmed", "Confirmed"], ["potential", "Potential"], ["inactive", "Inactive"], ["dismissed", "Dismissed"],
   ["history", "Historical Results"], ["scans", "Scan History"], ["settings", "Domain Settings"]];
 
 // ----------------------------------------------------------------------------- formatting
@@ -239,6 +239,7 @@ function schRenderBatch() {
       <div class="sch-head"><div><h2>${esc(b.name)} ${schPill(b.display_status)}</h2><div class="sch-sub">${esc(b.schedule_text)}${b.next_run_at ? ` · next run ${esc(schWhen(b.next_run_at))} (${esc(schRel(b.next_run_at))})` : ""} · depth ${esc(b.depth)} · missed runs: ${b.missed_policy === "skip" ? "skip" : "run once"}${b.description ? `<br>${esc(b.description)}` : ""}</div></div>
         <div class="sch-actions">${act ? schBtn("cancel-exec", "Cancel run", { id: act.id }, "btn btn-danger-ghost btn-sm") : schBtn("run-batch", "Run now", { id: b.id }, "btn btn-primary btn-sm")}
           ${statusBtns}${schBtn("add-domains", "+ Domains", { id: b.id })}${schBtn("edit-batch", "Edit", { id: b.id })}${schBtn("dup-batch", "Duplicate", { id: b.id }, "btn btn-ghost btn-sm")}
+          <a class="btn btn-secondary btn-sm" href="/api/scheduler/batches/${encodeURIComponent(b.id)}/export?format=csv&view=all" download title="All findings of every domain in this batch">Export CSV</a>
           ${schBtn("dm-batch", "Delete…", { id: b.id }, "btn btn-danger-ghost btn-sm")}</div></div></div>
       <div class="sch-tiles">
         <div class="sch-tile t-accent"><div class="t-val">${schNum(b.domain_count)}</div><div class="t-label">Domains</div></div>
@@ -264,7 +265,7 @@ async function schLoadDomain() {
   const id = encodeURIComponent(SCH.domainId);
   const tab = SCH.domainTab;
   const reqs = [settingsCall("GET", `/api/scheduler/domains/${id}`)];
-  if (["new", "all", "confirmed", "potential"].includes(tab)) {
+  if (["new", "all", "confirmed", "potential", "inactive", "dismissed"].includes(tab)) {
     const qs = new URLSearchParams({ view: tab, page: SCH.page, page_size: 50, sort: SCH.sort, q: SCH.q });
     reqs.push(settingsCall("GET", `/api/scheduler/domains/${id}/findings?${qs}`));
   } else if (tab === "history") reqs.push(settingsCall("GET", `/api/scheduler/domains/${id}/observations?limit=300`));
@@ -293,8 +294,10 @@ function schFindingRows(items) {
 }
 
 function schBulkHtml() {
-  return SCH.selected.size ? `<div class="row" style="gap:6px"><span class="hint">${SCH.selected.size} selected</span>
+  const dismissedTab = SCH.domainTab === "dismissed";
+  return SCH.selected.size ? `<div class="row" style="gap:6px;flex-wrap:wrap"><span class="hint">${SCH.selected.size} selected</span>
       ${schBtn("review", "Mark under review", { on: "1" }, "btn btn-ghost btn-xs")}${schBtn("review", "Clear review", { on: "0" }, "btn btn-ghost btn-xs")}
+      ${dismissedTab ? schBtn("dismiss", "Restore", { on: "0" }, "btn btn-secondary btn-xs") : schBtn("dismiss", "Dismiss as false positive", { on: "1" }, "btn btn-secondary btn-xs")}
       ${schBtn("dm-findings", "Delete selected…", {}, "btn btn-danger-ghost btn-xs")}</div>` : "";
 }
 
@@ -313,11 +316,11 @@ function schRenderDomain() {
   const batch = (d.batches || [])[0];
   const id = d.id;
   const tabs = SCH_TABS.map(([k, label]) => {
-    const n = { new: c.new, all: c.total, confirmed: c.confirmed, potential: c.potential, scans: d.scans, history: d.observations }[k];
+    const n = { new: c.new, all: c.total, confirmed: c.confirmed, potential: c.potential, inactive: c.inactive, dismissed: c.dismissed, scans: d.scans, history: d.observations }[k];
     return `<button type="button" class="tab ${tab === k ? "active" : ""}" data-sch="domain-tab" data-tab="${k}" role="tab" aria-selected="${tab === k}">${label}${n !== undefined ? ` <span class="count">${schNum(n)}</span>` : ""}</button>`;
   }).join("");
   let body = "";
-  if (["new", "all", "confirmed", "potential"].includes(tab)) {
+  if (["new", "all", "confirmed", "potential", "inactive", "dismissed"].includes(tab)) {
     const items = (list && list.items) || [];
     const bulk = `<div id="sch-bulk">${schBulkHtml()}</div>`;
     body = `<div class="sch-toolbar"><div class="row" style="gap:8px">
@@ -325,7 +328,7 @@ function schRenderDomain() {
         <select class="select select-sm" id="sch-sort" style="width:auto">${[["score", "Highest score"], ["last_seen", "Last seen"], ["first_seen", "First seen"], ["host", "Host A–Z"]].map(([v, l]) => `<option value="${v}" ${SCH.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>${bulk}</div>
       ${items.length ? `<div class="table-wrap"><table class="table sch-table"><thead><tr><th><input type="checkbox" data-sch-checkall aria-label="Select all on this page"></th><th>Host</th><th>Class</th><th>Lifecycle</th><th>Score</th><th>Match</th><th>DNS</th><th>First seen</th><th>Last seen</th><th></th></tr></thead><tbody>${schFindingRows(items)}</tbody></table>
         <div class="sch-pager"><span>${schNum(list.total)} findings · page ${list.page} of ${list.pages}</span>${schBtn("page", "‹ Prev", { p: list.page - 1 }, "btn btn-ghost btn-xs")}${schBtn("page", "Next ›", { p: list.page + 1 }, "btn btn-ghost btn-xs")}</div></div>`
-        : `<div class="sch-empty"><b>${tab === "new" ? "No new discoveries" : "No findings here"}</b>${d.last_scan_at ? `Last scan ${esc(ago(d.last_scan_at))}.` : "This domain has not been scanned yet."}</div>`}`;
+        : `<div class="sch-empty"><b>${tab === "new" ? "No new discoveries" : tab === "dismissed" ? "Nothing dismissed" : "No findings here"}</b>${d.last_scan_at ? `Last scan ${esc(ago(d.last_scan_at))}.` : "This domain has not been scanned yet."}</div>`}`;
   } else if (tab === "history") {
     const obs = (list && list.observations) || [];
     body = obs.length ? `<div class="table-wrap"><table class="table sch-table"><thead><tr><th>Observed</th><th>Host</th><th>Change</th><th>Class</th><th>Score</th><th>DNS</th></tr></thead><tbody>${obs.map(o => `<tr>
@@ -600,6 +603,14 @@ async function schAction(act, ds, el) {
     case "review": {
       const r = await post(`/api/scheduler/domains/${encodeURIComponent(SCH.domainId)}/findings/review`, { ids: [...SCH.selected], under_review: ds.on === "1" });
       showToast(`${r.updated} finding(s) updated`); SCH.selected.clear(); break;
+    }
+    case "dismiss": {
+      const on = ds.on === "1";
+      const reason = on ? (window.prompt("Why is this a false positive? (optional, kept with the finding)", "") ?? null) : "";
+      if (reason === null) return;
+      const r = await post(`/api/scheduler/domains/${encodeURIComponent(SCH.domainId)}/findings/dismiss`, { ids: [...SCH.selected], dismissed: on, reason });
+      showToast(on ? `${r.updated} finding(s) dismissed: hidden from review and alerts` : `${r.updated} finding(s) restored`);
+      SCH.selected.clear(); break;
     }
     case "dm-findings": return dmOpen({ type: "findings", id: SCH.domainId, ids: [...SCH.selected] });
     case "dm-all-findings": return dmOpen({ type: "findings", id, all: true });

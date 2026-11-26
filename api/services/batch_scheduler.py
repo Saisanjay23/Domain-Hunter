@@ -160,6 +160,7 @@ class BatchScheduler:
             out.append(e["_id"])
         for b in db.scan_batches.find({"active_execution_id": {"$ne": None}}, {"_id": 1}):
             ss._clear_stale_active(db, b["_id"])
+        out += ss.finish_interrupted_deletes(db, now=now)
         return out
 
     # ------------------------------------------------------------------ scheduling
@@ -392,7 +393,10 @@ class BatchScheduler:
         notify = b.get("notify") or {}
         classes = ["confirmed"] if notify.get("min_classification") == "confirmed" else ["confirmed", "potential"]
         new = list(db.scan_observations.find({"execution_id": e["_id"], "change": "new", "classification": {"$in": classes}},
-                                             {"host": 1, "score": 1, "classification": 1}).sort("score", -1).limit(15))
+                                             {"host": 1, "score": 1, "classification": 1, "finding_id": 1}).sort("score", -1).limit(50))
+        if new:
+            hidden = {f["_id"] for f in db.impersonation_findings.find({"_id": {"$in": [o["finding_id"] for o in new]}, "dismissed": True}, {"_id": 1})}
+            new = [o for o in new if o["finding_id"] not in hidden][:15]
         messages = []
         if notify.get("on_new", True) and new:
             hosts = ", ".join(f"{o['host']} ({o['score']})" for o in new[:10])

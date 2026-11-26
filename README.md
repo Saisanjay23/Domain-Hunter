@@ -108,7 +108,8 @@ Start with `python favicon_hash.py --ui` (or `python app.py --port 8080`). The s
 | History, Watchlist | Reopen past hunts, triage domains, monitor brands on a schedule. |
 | Scan Scheduler | Batches of monitored domains (each with its own keywords), scanned automatically on a schedule, with per-domain dashboards. See below. |
 | Data Management | Per-domain / per-batch volumes, scoped deletions with typed confirmation, and the audit log. |
-| API keys, Storage | Configure sources; MongoDB connection and legacy SQLite import. |
+| Infrastructure | One domain in, linked infrastructure out. Every investigation is saved: reopen, export or delete it, and see what changed since the last one for the same seed. |
+| API keys, Storage | Configure sources; MongoDB connection and transaction support. |
 
 ## Configuration
 
@@ -145,8 +146,9 @@ MongoDB is the only database. With no configuration the app uses the local serve
 
 - **Strings:** `mongodb://127.0.0.1:27017`, replica sets, and Atlas (`mongodb+srv://user:password@cluster0.xxxxx.mongodb.net/`). Percent-encode special characters in the password. The database defaults to the one in the URI, otherwise `brand_hunter`.
 - **Credentials** stay in `.env`; the UI shows hosts and database only, and every error message is redacted.
-- **Collections:** `hunts`, `candidates`, `triage`, `watchlist`, `alerts`, `counters` (hunts and cases) and `organizations`, `monitored_domains`, `scan_batches`, `batch_domain_memberships`, `batch_executions`, `scan_jobs`, `impersonation_findings`, `scan_observations`, `scheduler_locks`, `application_settings`, `audit_logs`, `migrations` (Scan Scheduler). Schema, indexes and query plans: [docs/SCHEDULER.md](docs/SCHEDULER.md).
-- **Legacy SQLite history** (`data/hunter.db` from older versions, or `BRAND_HUNTER_DB`): *Settings → Storage → Import legacy SQLite file* or `python favicon_hash.py --migrate-history`. The import makes a verified backup copy in `data/backups/` first, opens the file read-only, copies every record idempotently (safe to repeat), validates the counts and records the run in `migrations`. The SQLite file and the backup are never deleted: remove them yourself once you have checked the data.
+- **Collections:** `hunts`, `candidates`, `triage`, `watchlist`, `alerts`, `counters` (hunts and cases), `infra_investigations` (Infrastructure history) and `organizations`, `monitored_domains`, `scan_batches`, `batch_domain_memberships`, `batch_executions`, `scan_jobs`, `impersonation_findings`, `scan_observations`, `scheduler_locks`, `application_settings`, `audit_logs` (Scan Scheduler). Schema, indexes and query plans: [docs/SCHEDULER.md](docs/SCHEDULER.md).
+- **Transactions:** on a replica set (or Atlas) every multi-collection delete and the full reset run as one all-or-nothing transaction. On a standalone server (Storage page shows which you have) the same deletes use a recoverable workflow: the target is hidden first, every step is scoped and idempotent, and the scheduler finishes an interrupted delete automatically within a minute.
+- **SQLite is gone:** older versions kept history in `data/hunter.db`. That backend, its importer and `--migrate-history` were removed; MongoDB is the only database.
 - **Several app instances** can share one MongoDB: due watchlist hunts and scheduled batch runs are claimed atomically, so exactly one instance runs each.
 - **If MongoDB is unreachable,** hunts still complete (with a note that they weren't saved), the API answers 503 "not reachable", and the scheduler retries on its next tick. The app never falls back to another database.
 
@@ -157,8 +159,24 @@ Batches of monitored domains that the **server** scans automatically (no browser
 - **Batches:** name, description, organization, schedule (daily at a time, weekly on chosen days, every N hours, or manual only) in any IANA time zone, scan depth, missed-run policy (*run once when back* or *skip*), notifications (in-app, webhook; on new findings and/or failures). Create, edit, pause/resume, enable/disable, duplicate (copies start paused), run now, cancel, retry failed domains, execution history.
 - **Domains:** paste or upload TXT / CSV / Excel (max 2 MB). URLs become hostnames, `www.` and IDNs are normalised, duplicates are merged (their keywords too), and invalid lines are shown with the reason so you can correct or remove them. Nothing is dropped silently. Each domain keeps its own keywords and allowlist.
 - **Isolation:** each domain is scanned on its own with only its keywords. Every finding belongs to exactly one monitored domain (`impersonation_findings` is unique on domain + host), so the same hostname found for two brands is two separate findings. All filtering, paging and exports happen server-side.
-- **Lifecycle** (separate from the Confirmed / Potential / Benign classification): *New*, *Previously Discovered*, *Updated* (evidence changed), *Reappeared*, *Currently Unreachable* (only when its own DNS says NXDOMAIN: a source outage never marks a host gone), plus an analyst *Under review* flag. First seen is kept, last seen is updated, and every scan records an observation per finding.
+- **Dismiss as false positive:** hidden from the review views, counts and alerts, kept across rescans, and brought back only if the host is later *Confirmed*. Restore it from the *Dismissed* tab.
+- **Lifecycle** (separate from the Confirmed / Potential / Inactive / Benign classification): *New*, *Previously Discovered*, *Updated* (evidence changed), *Reappeared*, *Currently Unreachable* (only when its own DNS says NXDOMAIN: a source outage never marks a host gone), plus an analyst *Under review* flag. First seen is kept, last seen is updated, and every scan records an observation per finding.
 - **Engine:** leases in MongoDB (restart-safe, multi-instance safe, one run per batch and one scan per domain at a time), configurable parallelism, per-domain timeout, retries with exponential back-off (longer after rate limits), graceful shutdown that resumes on the next start. Settings: *Scan Scheduler → Engine settings* (`SCHEDULER_CONCURRENCY`, `SCHEDULER_JOB_TIMEOUT` set defaults; `BRAND_HUNTER_SCHEDULER=0` turns background scheduling off).
+- **Scale:** per-domain counters keep the overview / batch / data pages independent of the number of findings; observations are recorded only when something changed and expire after `observation_retention_days` (default 365, a MongoDB TTL index). `GET /api/scheduler/health` returns 200 while the engine is ticking and 503 when it is off or stalled (for monitoring). `python tools/load_test.py` reproduces the measurements in [docs/SCHEDULER.md](docs/SCHEDULER.md).
+- **Export:** CSV / JSON of one domain or of a whole batch.
+
+### Classification
+
+Every candidate is *Confirmed* (high score **and** independent corroboration), *Potential* (needs review), *Inactive / Historical* or *Benign*. Two rules keep the review queue short without hiding live threats:
+
+- **Inactive / Historical:** listed by a feed or reputation source, but the domain no longer exists (NXDOMAIN) and was never seen live (no inspected page, no URLScan sighting, nothing reported in the last 30 days). It returns to Potential / Confirmed on its own if it comes back. A never-seen lookalike with no DNS stays Potential: it may be activated later.
+- **Benign (page only mentions the brand):** a live third-party page found by a title / text search whose title does not present itself *as* the brand and that has no password form, brand assets, lure wording or reputation listing ("Probiotic sold on Amazon", "Amazon Landing Page Generator"). A page titled "Amazon: Earth's Biggest Selection" or "Sign in | PayPal" stays Potential.
+
+Measured on a real `amazon.com` quick hunt (736 candidates): Potential 492 → 189 (−62 %), Inactive 272, Confirmed 32 → 32.
+
+### Reset all data
+
+*Data Management → Reset all data* backs up every application collection (gzip JSON lines, each file read back and counted) to `data/backups/reset-<time>/`, then deletes hunts, cases, watchlist, alerts, scan batches, findings and saved investigations (one transaction when the server supports it). API keys, storage and scheduler settings are kept, the reset is audited, and nothing outside this application's collections is touched. Restore with `python -m core.reset restore <folder>`.
 
 ### Security
 
@@ -213,7 +231,6 @@ python favicon_hash.py -d gi-de.com                                      # asset
 python favicon_hash.py -d gi-de.com -o gi_de.json -c gi_de.csv --save-icons ./downloaded_icons
 python favicon_hash.py -f sample_targets.txt -o batch.json -c batch.csv  # batch scan
 python favicon_hash.py -d gi-de.com --launch                             # open master queries on all 4 platforms
-python favicon_hash.py --migrate-history                                 # import a legacy SQLite history into MongoDB (backup + validation)
 ```
 
 Hunt options: `--depth quick|standard|deep`, `--no-ct`, `--no-feeds`, `--no-intel`, `--no-verify` (DNS only), `--no-rdap`, `--no-save` (skip history), `--allow other-brand-domain.com,...`, `--keywords ports,green,...` (extra combosquat words). Scan options: `--no-logos`, `--no-subdomains`, `--save-icons DIR`, `--timeout N`, `-q`.
@@ -248,7 +265,8 @@ core/
   verifier.py           live-site inspection and explainable scoring
   takedown.py, alerts.py   abuse contacts, e-mail and evidence report, blocklist / STIX; alert rules and webhooks
   store.py, mongostore.py, mongouri.py   MongoDB case store (hunts, triage, watchlist, alerts)
-  migrate.py            one-way legacy SQLite import (backup, idempotent copy, validation)
+  investigations.py     Infrastructure Investigator history (save, list, reopen, diff, delete)
+  reset.py              verified backup + full data reset, restore
   scheduler_store.py    Scan Scheduler data layer: batches, domains, executions, jobs, findings lifecycle, scoped deletes
   schedule.py, domain_input.py   schedules / next run (time zones, DST); bulk domain import (TXT / CSV / XLSX)
   netguard.py           SSRF guard for page inspection
@@ -262,16 +280,23 @@ core/
   crawler.py, hasher.py, matcher.py, query_gen.py, platforms.py, impersonation.py, domains.py, exporter.py
 web/static/             dashboard: index.html, css/ (tokens, shell, components, overview, infra, scheduler), js/ (shell = theme, palette, notifications, overview; scheduler, datamgmt)
 docs/SCHEDULER.md       scheduler architecture, collections and indexes, isolation, deletion, measurements
-tests/                  pytest suite (offline)
+tools/                  check.py (all checks in one command), load_test.py (scheduler scale test)
+tests/                  pytest suite (offline; includes Playwright browser tests)
 ```
 
 ## Development
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q tests                  # offline, no network needed (in-memory MongoDB via mongomock)
-python -m ruff check app.py favicon_hash.py core tests
+python tools/check.py                      # everything: lint, JavaScript syntax, all tests incl. browser tests
+python tools/check.py --quick              # same without the browser (Playwright) tests
+python tools/check.py --live               # also run storage / scheduler / reset tests on a real MongoDB
+python -m pytest -q tests                  # just the tests (offline; in-memory MongoDB via mongomock)
+python -m ruff check .                     # fixed rule set in ruff.toml; never use --fix with a partial --select
+python -m playwright install chromium     # once, for tests/test_ui.py (skipped when no browser is installed)
 ```
+
+A test that hangs is stopped after `BRAND_HUNTER_TEST_TIMEOUT` seconds (default 180) and the stack of the stuck line is written to `.pytest-hang.log`. `tests/test_hygiene.py` fails when an imported package is missing from `requirements.txt`, a class or function is defined twice in one module, or a JavaScript file does not parse.
 
 To also run the storage and scheduler suites against a real MongoDB (throwaway `bih_test_*` databases are created and dropped):
 

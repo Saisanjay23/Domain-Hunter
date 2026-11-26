@@ -152,10 +152,6 @@ class StorageUriRequest(BaseModel):
     db: Optional[str] = None
 
 
-class MigrateRequest(BaseModel):
-    direction: str = "from_sqlite"
-
-
 # ---------------------------------------------------------------------------- Scan Scheduler & Data Management
 class ScheduleSpec(BaseModel):
     frequency: str = "daily"
@@ -238,6 +234,12 @@ class FindingReviewRequest(BaseModel):
     under_review: bool = True
 
 
+class FindingDismissRequest(BaseModel):
+    ids: List[str] = Field(default_factory=list, max_length=1000)
+    dismissed: bool = True
+    reason: str = Field("", max_length=300)
+
+
 class SchedulerSettingsRequest(BaseModel):
     enabled: Optional[bool] = None
     concurrency: Optional[int] = None
@@ -265,3 +267,9 @@ class DeleteBatchRequest(BaseModel):
 class DeleteDomainRequest(BaseModel):
     confirm: str = Field("", max_length=300)
     cancel_active: bool = False
+
+
+class DataResetRequest(BaseModel):
+    confirm: str = Field("", max_length=50)
+    include_audit: bool = False
+    clear_source_log: bool = True

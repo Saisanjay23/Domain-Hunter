@@ -14,7 +14,7 @@ workflow. User-facing overview: README → *Storage*, *Scan Scheduler*, *Securit
 | API | `api/routes/scheduler.py`, `api/routes/datamgmt.py` | `/api/scheduler/*`, `/api/data/*` |
 | UI | `web/static/js/scheduler.js`, `web/static/js/datamgmt.js`, `web/static/css/scheduler.css` | Scan Scheduler and Data Management pages (render server data only) |
 | Storage | `core/store.py`, `core/mongostore.py` | MongoDB connection selection and the case store (hunts, candidates, triage, watchlist, alerts) |
-| Legacy import | `core/migrate.py` | One-way SQLite → MongoDB import (backup, idempotent copy, validation) |
+| History / reset | `core/investigations.py`, `core/reset.py` | Infrastructure investigation history; verified backup + full data reset |
 
 The scan itself is the existing hunt engine (`core.hunter.run_hunt`), called once per monitored domain with
 that domain's keywords and allowlist. Each domain scan is saved as a normal hunt (`hunts` / `candidates`, id =
@@ -58,17 +58,17 @@ policy: `run_once` (one catch-up run, not one per missed slot) or `skip` (audite
 | Collection | Key fields | Indexes |
 |---|---|---|
 | `organizations` | `_id org_*`, `name`, `name_key` | `name_key` unique |
-| `monitored_domains` | `_id md_*`, `domain`, `organization_id`, `keywords[]` (≤30), `allowlist[]` (≤100), `depth`, `status`, `last_scan_at`, `last_status` | `domain` unique; `organization_id` |
+| `monitored_domains` | `_id md_*`, `domain`, `organization_id`, `keywords[]` (≤30), `allowlist[]` (≤100), `depth`, `status`, `stats{}` (per-domain counters), `last_scan_at`, `last_status` | `domain` unique; `organization_id` |
 | `scan_batches` | `_id bt_*`, `name`, `schedule{}`, `status`, `next_run_at`, `missed_policy`, `notify{}` (webhook stored, never returned), `active_execution_id`, lease | `name_key` unique; `(status, next_run_at)` |
 | `batch_domain_memberships` | `_id "<batch>:<domain>"`, `batch_id`, `domain_id` | `(batch_id, domain_id)` unique; `domain_id` |
 | `batch_executions` | `_id ex_*`, `batch_id`, `trigger`, `status`, totals, `current[]` (≤10), `cancel_requested`, `owner`, `heartbeat`, `slot_key` | `(batch_id, created)`; `(status, heartbeat)`; `slot_key` unique sparse |
 | `scan_jobs` | `_id jb_*`, `execution_id`, `batch_id`, `domain_id`, `keywords_used`, `status`, `attempts`, `next_attempt_at`, `hunt_id`, `counts{}` | `(execution_id, status, next_attempt_at)`; `(domain_id, created)`; `batch_id` |
-| `impersonation_findings` | `_id "<domain_id>:<host>"`, `domain_id`, `host`, `classification`, `lifecycle`, `score`, evidence summary, `first_seen`, `last_seen`, `missed_scans`, `first_/last_ job / execution / batch ids`, `under_review` | `(domain_id, host)` unique; `(domain_id, score, host)`; `(domain_id, classification, score, host)`; `(domain_id, lifecycle, score, host)`; `(domain_id, last_seen)`; `host` |
-| `scan_observations` | `_id "<job>:<host>"`, `finding_id`, `domain_id`, `job_id`, `execution_id`, `batch_id`, `change`, `score`, `observed_at` | `(domain_id, observed_at)`; `(finding_id, observed_at)`; `job_id` |
+| `impersonation_findings` | `_id "<domain_id>:<host>"`, `domain_id`, `host`, `classification`, `lifecycle`, `score`, evidence summary, `first_seen`, `last_seen`, `missed_scans`, `first_/last_ job / execution / batch ids`, `under_review`, `dismissed` | `(domain_id, host)` unique; `(domain_id, score, host)`; `(domain_id, classification, score, host)`; `(domain_id, lifecycle, score, host)`; `(domain_id, last_seen)`; `host` |
+| `scan_observations` | `_id "<job>:<host>"`, `finding_id`, `domain_id`, `job_id`, `execution_id`, `batch_id`, `change`, `score`, `observed_at`, `observed_dt` | `(domain_id, observed_at)`; `(finding_id, observed_at)`; `job_id`; TTL on `observed_dt` |
 | `scheduler_locks` | `_id`, `owner`, `until` | — |
 | `application_settings` | `_id "scheduler"`: `enabled`, `concurrency`, `max_parallel_executions`, `job_timeout`, `max_attempts`, `retry_base_seconds`, `lease_seconds` | — |
 | `audit_logs` | `_id au_*`, `at`, `actor` (client address), `action`, `target_type`, `target_id`, `details` | `at`; `(target_type, target_id)` |
-| `migrations` | `_id "sqlite:<sha256>"`, report of each legacy import | — |
+| `infra_investigations` | `_id` (12 hex job id), `seed`, `params`, `summary{}`, `result{}` (graph, domains, dossier), `size_bytes`, `trimmed` | `created`; `(seed, created)` |
 
 No document holds an unbounded array: batch membership is its own collection, keyword / allowlist / current-domain
 arrays are capped, and per-scan history lives in `scan_observations`.
@@ -96,31 +96,29 @@ Benign / unrelated candidates are only stored when the host is already a finding
 
 ## 6. Deletion workflow (Data Management)
 
-MongoDB here is a standalone server (no multi-document transactions), so deletes are **recoverable and
-idempotent** instead of transactional:
+Every destructive operation is a function that takes an optional MongoDB session (`run_atomic` in `core/scheduler_store.py`):
+
+* **Replica set / Atlas** (`supports_transactions`): the whole operation runs in one multi-document transaction through
+  `session.with_transaction`: all of it or nothing, no half-deleted state is ever visible.
+* **Standalone server**: the same function runs with no session as a recoverable workflow. The target is first marked
+  `deleting` (hidden from the UI and the scheduler), each step is a scoped, idempotent `delete_many`, and the target's
+  own document is removed last. If the process stops half-way, the engine's tick (`finish_interrupted_deletes`) repeats
+  the delete for anything still marked `deleting` for more than 60 s.
+
+Common to both:
 
 1. `GET /api/data/impact` shows exactly what will be removed (counts, batches, running scans, shared data note).
 2. The request must come from this machine, same-origin, and carry the exact domain / batch name (`confirm`).
-3. A domain is first marked `deleting` (the scheduler and UI stop using it), queued jobs are cancelled, a running
-   scan blocks the delete (or is asked to stop with `cancel_active`).
-4. Scoped `delete_many` calls by `domain_id` / `batch_id` / explicit id lists, collection by collection; the domain or
-   batch document is removed last, so repeating an interrupted delete finishes it.
-5. Saved hunts are removed only when they were created by the scheduler (`scheduled_batch: true`); manual Brand Hunt
-   history and infrastructure data are never touched.
-6. An `audit_logs` entry records who (client address), what and the counts removed.
+3. A running scan blocks the delete (or is asked to stop with `cancel_active`).
+4. Saved hunts are removed only when the scheduler created them (`scheduled_batch: true`); manual Brand Hunt history and
+   infrastructure data are never touched by a domain or batch delete.
+5. An `audit_logs` entry records who (client address), what and the counts removed.
 
-## 7. Legacy SQLite import
+**Reset all data** (`core/reset.py`): backup of every application collection (gzip JSON lines, each file read back and
+counted before anything is deleted), then one wipe (transaction when supported), then an audit entry; refuses while a
+batch is running. Verified on a standalone server, a replica set and mongomock; a failing backup deletes nothing.
 
-`core/migrate.py` (Settings → Storage, or `python favicon_hash.py --migrate-history`):
-SHA-256 of the source → consistent backup with the sqlite3 online-backup API into `data/backups/` (row counts of the
-copy verified) → read-only copy into MongoDB (hunts upserted by id, triage by brand+domain, watchlist skipped when the
-brand exists, alerts skipped when `(created, brand, title)` exists) → count validation per collection → report stored
-in `migrations`. The SQLite file and its backups are never deleted by the app.
-
-In this installation no SQLite file existed (`data/hunter.db` absent), so there was nothing to migrate; the live
-MongoDB `brand_hunter` data (9 hunts, 1,372 candidates) was left as is.
-
-## 8. Measurements (QA database, 1,761 findings, 4,061 observations)
+## 7. Measurements: indexes (QA database, 1,761 findings, 4,061 observations)
 
 Default findings sort `(score desc, host asc)` inside one domain, before and after the sort-matching indexes:
 
@@ -139,6 +137,34 @@ findings of a domain; the index keeps a page at 50 documents examined):
 | findings, page 15 | 21.2 ms | 13.0 ms |
 | overview / batches / batch detail / domain dashboard / data summary | 9.6 / 11.4 / 17.7 / 19.1 / 14.8 ms | 11.3 / 10.5 / 23.3 / 21.5 / 17.7 ms (unchanged code; differences are run-to-run noise at this size) |
 
+## 8. Scale test (`tools/load_test.py`, real MongoDB 8.2.1 standalone, throwaway database)
+
+300 monitored domains, ~300 findings per scan, 6 runs ("days") with churn (disappearing / new / re-scored lookalikes),
+concurrency 4. The scan engine is a deterministic generator, so this measures the scheduler and the database layer.
+
+| | Before | After |
+|---|---|---|
+| Findings stored | 116,982 | 116,982 |
+| Observations after 6 runs | 540,000 (241 MB) | 284,784 (133 MB): only changes are recorded |
+| Overview page | 393 ms | 18.7 ms |
+| Batch list | 385 ms | 16.5 ms |
+| Batch detail (300 domains) | 638 ms | 51.9 ms |
+| Data summary | 331 ms | 42.7 ms |
+| Domain dashboard / findings page / search | 16 / 13 / 14 ms | 16.5 / 19 / 20 ms (page reads are index-backed; unchanged within noise) |
+| Throughput | 18–25 domains/s | 18–23 domains/s (unchanged: bound by writing 300 findings per domain) |
+
+What changed: per-domain counters stored on the monitored domain and refreshed after every scan or analyst change
+(pages sum ~300 small documents instead of aggregating ~117k findings), observations written only when a finding is new,
+updated, reappeared or unreachable (a repeat sighting only moves `last_seen`), and a TTL index
+(`observation_retention_days`, default 365) so history cannot grow forever.
+
+Soak: 30 consecutive runs of 300 domains x ~120 findings: every run completed 300/300, 46,800 findings (stable after run 8),
+485,518 observations (228 MB, ~15,000 per run = the changed findings), run time 10.7–28.5 s (typically 12 s), all pages
+stayed under 60 ms at the end. The retention TTL caps observations at the changes of the last year.
+
+Tests prove the stored counters equal a live aggregate after a scan, a re-scan, dismissals, deletes, history clearing and
+for data that predates the counters.
+
 ## 9. Verified behaviour (live QA, separate `brand_hunter_qa` database)
 
 * Batch created in the UI from pasted text with invalid lines, a duplicate (keywords merged) and an IP; invalid lines
@@ -156,8 +182,9 @@ findings of a domain; the index keeps a page at 50 documents examined):
 
 * The engine runs inside the web-server process: schedules run while at least one app instance is running
   (missed slots then follow the missed-run policy).
-* Without a replica set there are no multi-document transactions; deletes use the recoverable workflow above.
+* Without a replica set there are no multi-document transactions; deletes use the recoverable workflow above (a replica set gives real transactions with no code change).
 * A hard-killed instance's running scans are resumed after the 120 s lease expires (graceful shutdown resumes at once).
 * The SSRF guard resolves the name before connecting; a DNS-rebinding host with a ~0 s TTL could still race it.
 * A domain shared by several batches has one configuration (keywords / allowlist): editing it in one batch applies to all.
 * A scan's duration and source coverage depend on the free sources' availability (crt.sh, DuckDuckGo, URLScan anonymous limits).
+* Throughput is bound by the hunt engine's network calls in production; the 300-domain database layer itself sustained ~20 domains/s.

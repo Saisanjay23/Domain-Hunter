@@ -33,6 +33,7 @@ const HUNT_FILTERS = [
   ["all", "All", () => true],
   ["confirmed_imp", "Confirmed", c => c.classification === "Confirmed Impersonation" || c.verdict === "phishing"],
   ["potential_imp", "Potential", c => c.classification === "Potential Impersonation"],
+  ["inactive", "Inactive / Historical", c => c.classification === "Inactive / Historical"],
   ["subdomain", "Subdomain Spoofs", c => !!(c.match_meta?.is_subdomain_impersonation || c.matching_subdomain || c.fuzzer === "brand-subdomain")],
   ["idn", "IDN / Homograph", c => !!(c.match_meta?.is_idn || c.match_meta?.mixed_script || c.fuzzer === "homoglyph" || c.fuzzer === "idn-homoglyph")],
   ["new_since", "New since last hunt", c => !!c.is_new],
@@ -486,7 +487,8 @@ function renderHunt(data) {
   const bc = st.by_classification || {};
   const confirmedCount = bc["Confirmed Impersonation"] ?? cands.filter(c => c.classification === "Confirmed Impersonation" || c.verdict === "phishing").length;
   const potentialCount = bc["Potential Impersonation"] ?? cands.filter(c => c.classification === "Potential Impersonation").length;
-  const benignCount = bc["Benign/Unrelated"] ?? Math.max(0, cands.length - confirmedCount - potentialCount);
+  const inactiveCount = bc["Inactive / Historical"] ?? cands.filter(c => c.classification === "Inactive / Historical").length;
+  const benignCount = bc["Benign/Unrelated"] ?? Math.max(0, cands.length - confirmedCount - potentialCount - inactiveCount);
   const todayIso = new Date().toISOString().slice(0, 10);
   const recentCount = cands.filter(c =>
     (c.rdap?.age_days !== null && c.rdap?.age_days !== undefined && c.rdap.age_days <= 7) ||
@@ -499,6 +501,7 @@ function renderHunt(data) {
     ["Total Discovered", cands.length, "Unique domain findings", "kpi-blue", "all"],
     ["Confirmed Impersonation", confirmedCount, "High-confidence threats", "kpi-danger", "confirmed_imp"],
     ["Potential Impersonation", potentialCount, "Lookalikes & unverified hits", "kpi-warning", "potential_imp"],
+    ["Inactive / Historical", inactiveCount, "Feed-listed, domain gone (NXDOMAIN)", "kpi-muted", "inactive"],
     ["Benign / Unrelated", benignCount, "Brand-owned & harmless matches", "kpi-muted", "live_unrelated"],
     ["Recent / Today", recentCount, "Registered <=7d or seen today", "kpi-teal", "new"],
     ["Subdomain Spoofs", subCount, "Brand in 3rd-party subdomain", "kpi-blue", "subdomain"],
